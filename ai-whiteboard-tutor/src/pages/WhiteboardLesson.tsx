@@ -1,152 +1,172 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 
-type ChatMsg = { role: "user" | "tutor"; text: string };
+type Evidence = {
+  quote: string;
+  meta: string;
+};
+
+const DEMO_EVIDENCE: Evidence[] = [
+  {
+    quote:
+      '"...the derivative of a function of a real variable measures the sensitivity to change of the function value with respect to a change in its argument..."',
+    meta: "Section 2.1, Page 12",
+  },
+  {
+    quote:
+      '"The derivative at a point can be interpreted as the slope of the tangent line to the graph at that point."',
+    meta: "Section 2.1, Page 13",
+  },
+];
 
 export default function WhiteboardLesson() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [isPlaying, setIsPlaying] = useState(true);
-  const [chat, setChat] = useState<ChatMsg[]>([
-    { role: "tutor", text: "Welcome. Upload + PDF grounding comes next." },
-  ]);
-  const [input, setInput] = useState("");
+  const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState(0);
+  const [chatInput, setChatInput] = useState("");
 
-  const modeLabel = useMemo(() => "🔒 PDF-only (placeholder)", []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const resize = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const { clientWidth, clientHeight } = canvas;
-      canvas.width = Math.floor(clientWidth * dpr);
-      canvas.height = Math.floor(clientHeight * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      draw();
-    };
-
-    const draw = () => {
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-
-      // background
-      ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = "#0b0f14";
-      ctx.fillRect(0, 0, w, h);
-
-      // header text on the board
-      ctx.fillStyle = "rgba(255,255,255,0.92)";
-      ctx.font = "600 22px ui-sans-serif, system-ui";
-      ctx.fillText("Whiteboard Lesson (UI Shell)", 28, 52);
-
-      // sample “written” text
-      ctx.fillStyle = "rgba(255,255,255,0.80)";
-      ctx.font = "16px ui-sans-serif, system-ui";
-      ctx.fillText(
-        "Next: WebLLM + RAG will generate SAY/WRITE/DRAW steps.",
-        28,
-        88
-      );
-
-      // simple diagram placeholder
-      ctx.strokeStyle = "rgba(255,255,255,0.35)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(28, 120, 320, 76);
-      ctx.beginPath();
-      ctx.moveTo(348, 158);
-      ctx.lineTo(420, 158);
-      ctx.stroke();
-      ctx.strokeRect(420, 120, 320, 76);
-
-      ctx.fillStyle = "rgba(255,255,255,0.70)";
-      ctx.font = "14px ui-sans-serif, system-ui";
-      ctx.fillText("Concept A", 44, 165);
-      ctx.fillText("Concept B", 436, 165);
-
-      // tiny source icon demo
-      ctx.fillText("📄", 332, 143);
-      ctx.fillText("📄", 724, 143);
-
-      // play state hint
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
-      ctx.font = "12px ui-sans-serif, system-ui";
-      ctx.fillText(isPlaying ? "Playing…" : "Paused", 28, h - 22);
-    };
-
-    resize();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-    // redraw when play state changes
-  }, [isPlaying]);
+  const selectedEvidence = useMemo(
+    () => DEMO_EVIDENCE[selectedEvidenceIndex] ?? DEMO_EVIDENCE[0],
+    [selectedEvidenceIndex]
+  );
 
   const onSend = () => {
-    const text = input.trim();
-    if (!text) return;
-    setChat((prev) => [...prev, { role: "user", text }]);
-    setInput("");
-    // Placeholder tutor response
-    setTimeout(() => {
-      setChat((prev) => [
-        ...prev,
-        {
-          role: "tutor",
-          text: "Got it. In the next step, this will run RAG on your PDF and answer with 📄 evidence.",
-        },
-      ]);
-    }, 350);
+    const v = chatInput.trim();
+    if (!v) return;
+    // For now: UI-only demo. We'll wire real interruption later.
+    setChatInput("");
+    alert(`Demo only (no tutor logic yet). You asked: ${v}`);
   };
 
   return (
-    <div className="whiteboard-root">
-      <div className="topbar">
-        <div className="left">
-          <strong>AI Whiteboard Tutor</strong>
-          <span className="chip">{modeLabel}</span>
+    <>
+      <header className="app-header">
+        <div className="brand">THAI ED-AI TUTOR</div>
+
+        <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+          <div className="mode-badge">
+            <span>🔒 PDF Strict Mode</span>
+          </div>
+          <button className="video-btn">Generate Video Recap</button>
         </div>
-        <div className="right">
-          <button onClick={() => setIsPlaying((p) => !p)}>
-            {isPlaying ? "Pause" : "Play"}
-          </button>
-        </div>
+      </header>
+
+      <div className="workspace">
+        {/* LEFT DRAWER */}
+        <aside className="drawer-left">
+          <div
+            className="upload-zone"
+            onClick={() => alert("Demo only: upload later")}
+            role="button"
+            tabIndex={0}
+          >
+            <p style={{ margin: 0 }}>Drag PDF here</p>
+            <div className="status-badge">Indexed ✅</div>
+          </div>
+
+          <div className="topic-list">
+            <h4>TOPICS FOUND</h4>
+            <ul>
+              <li>• Introduction to Calculus</li>
+              <li>• Limits and Continuity</li>
+              <li className="active">• The Derivative Concept ➔</li>
+            </ul>
+          </div>
+        </aside>
+
+        {/* CENTER WHITEBOARD */}
+        <main className="whiteboard-stage">
+          <div className="whiteboard-surface">
+            <div className="lesson-chunk">
+              <strong>The Derivative</strong> represents the instantaneous rate
+              of change of a function. Imagine a car moving along a curve; the
+              derivative at any point is its exact speed at that moment.
+              <span
+                className="source-pill"
+                onClick={() => setSelectedEvidenceIndex(0)}
+                role="button"
+                tabIndex={0}
+                title="View evidence"
+              >
+                📄 p. 12
+              </span>
+            </div>
+
+            <div className="diagram-box">[ AI is drawing a slope diagram... ]</div>
+          </div>
+
+          {/* MINI CHAT */}
+          <div className="chat-hub">
+            <div className="chat-title">Interactive Tutor Chat</div>
+
+            <div className="chat-messages">
+              <p style={{ marginTop: 0 }}>
+                <strong>Tutor:</strong> Do you understand how the slope connects
+                to the derivative?
+              </p>
+            </div>
+
+            <div className="chat-input">
+              <input
+                type="text"
+                placeholder="Ask a question..."
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onSend();
+                }}
+              />
+              <button className="btn-send" onClick={onSend}>
+                Send
+              </button>
+            </div>
+          </div>
+        </main>
+
+        {/* RIGHT DRAWER */}
+        <aside className="drawer-right">
+          <div className="evidence-header">Source Evidence</div>
+          <div className="evidence-content">
+            <div className="quote-box">
+              <em>{selectedEvidence.quote}</em>
+              <p style={{ marginTop: 10, fontSize: "0.75rem", color: "#64748B" }}>
+                {selectedEvidence.meta}
+              </p>
+            </div>
+
+            <button
+              className="view-pdf-btn"
+              onClick={() => alert("Demo only: PDF overlay later")}
+            >
+              View Full PDF Page
+            </button>
+
+            <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                style={{
+                  border: "1px solid #E2E8F0",
+                  background: "white",
+                  borderRadius: 6,
+                  padding: "8px 10px",
+                  cursor: "pointer",
+                }}
+                onClick={() => setSelectedEvidenceIndex(0)}
+              >
+                Evidence 1
+              </button>
+              <button
+                style={{
+                  border: "1px solid #E2E8F0",
+                  background: "white",
+                  borderRadius: 6,
+                  padding: "8px 10px",
+                  cursor: "pointer",
+                }}
+                onClick={() => setSelectedEvidenceIndex(1)}
+              >
+                Evidence 2
+              </button>
+            </div>
+          </div>
+        </aside>
       </div>
-
-      <div className="stage">
-        <canvas ref={canvasRef} />
-
-        <div className="mini-chat">
-          <div className="mini-chat-header">
-            <strong style={{ fontSize: 13 }}>Mini Chat</strong>
-            <span className="small">Interrupt anytime</span>
-          </div>
-
-          <div className="mini-chat-body">
-            {chat.map((m, idx) => (
-              <div key={idx} style={{ marginBottom: 8 }}>
-                <strong style={{ color: "rgba(255,255,255,0.85)" }}>
-                  {m.role === "user" ? "You" : "Tutor"}:
-                </strong>{" "}
-                {m.text}
-              </div>
-            ))}
-          </div>
-
-          <div className="mini-chat-input">
-            <input
-              type="text"
-              value={input}
-              placeholder="Ask a question…"
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") onSend();
-              }}
-            />
-            <button onClick={onSend}>Send</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </>
   );
 }
