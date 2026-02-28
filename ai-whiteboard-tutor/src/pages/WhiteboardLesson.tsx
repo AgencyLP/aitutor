@@ -1,5 +1,12 @@
 import React, { useMemo, useRef, useState } from "react";
 import { extractPdfText, type ExtractedPdf } from "../rag/pdfExtract";
+import { buildLessonPrompt, extractFirstJsonObject } from "../llm/prompts";
+import { generateText, hasWebGPU } from "../llm/webllmClient";
+import {
+  layoutRadial,
+  type ConceptMap,
+  type PositionedNode,
+} from "../whiteboard/diagrams/conceptMap";
 
 type IndexState =
   | { status: "idle" }
@@ -7,64 +14,90 @@ type IndexState =
   | { status: "indexed"; filename: string; numPages: number; pdf: ExtractedPdf }
   | { status: "error"; message: string };
 
-type ChatMsg = { role: "tutor" | "user"; text: string };
+type Lesson = {
+  title: string;
+  bullets: string[];
+  diagram: ConceptMap;
+  citations: number[];
+  notes?: string;
+};
 
-function buildAnswerFromPdf(question: string, pdf: ExtractedPdf): string {
-  const q = question.toLowerCase().trim();
+type LessonState =
+  | { status: "idle" }
+  | { status: "loadingModel"; message: string }
+  | { status: "generating"; message: string }
+  | { status: "ready"; lesson: Lesson; raw: string }
+  | { status: "error"; message: string; raw?: string };
 
-  // "What is this PDF?" / summary-type questions
-  if (
-    q.includes("what is this") ||
-    q.includes("what's this") ||
-    q.includes("summar") ||
-    q.includes("overview") ||
-    q.includes("about this") ||
-    q === "what is this pdf" ||
-    q === "what is this pdf?"
-  ) {
-    const firstPages = pdf.pages.slice(0, Math.min(2, pdf.pages.length));
-    const combined = firstPages.map((p) => p.text).join("\n\n");
-    const snippet = combined.slice(0, 900).trim();
+function buildContextFromPdf(pdf: ExtractedPdf) {
+  // Keep it short so local models don’t choke: first 2 pages, truncated.
+  const pages = pdf.pages.slice(0, Math.min(2, pdf.pages.length));
+  const parts = pages.map((p) => {
+    const trimmed = p.text.slice(0, 2500);
+    return `--- PAGE ${p.pageNumber} ---\n${trimmed}`;
+  });
+  return parts.join("\n\n");
+}
 
-    const pageNum = firstPages[0]?.pageNumber ?? 1;
-    return `Here’s what your PDF appears to be about (from the first pages):\n\n${snippet}${
-      combined.length > 900 ? "…" : ""
-    }\n\n📄 p.${pageNum}`;
+function safeParseLesson(text: string): Lesson | null {
+  const candidate = extractFirstJsonObject(text) ?? text;
+  try {
+    const obj = JSON.parse(candidate);
+
+    // Basic shape checks
+    if (!obj || typeof obj !== "object") return null;
+    if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
+
+    // Force expected types
+    const lesson: Lesson = {
+      title: String(obj.title),
+      bullets: Array.isArray(obj.bullets)
+        ? obj.bullets.map((b: any) => String(b)).slice(0, 9)
+        : [],
+      diagram: {
+        type: "concept_map",
+        nodes: Array.isArray(obj.diagram?.nodes)
+          ? obj.diagram.nodes
+              .map((n: any, i: number) => ({
+                id: String(n.id ?? `n${i + 1}`),
+                label: String(n.label ?? ""),
+              }))
+              .filter((n: any) => n.label)
+              .slice(0, 7)
+          : [],
+        edges: Array.isArray(obj.diagram?.edges)
+          ? obj.diagram.edges
+              .map((e: any) => ({
+                from: String(e.from ?? ""),
+                to: String(e.to ?? ""),
+                label: e.label ? String(e.label) : "",
+              }))
+              .filter((e: any) => e.from && e.to)
+              .slice(0, 7)
+          : [],
+      },
+      citations: Array.isArray(obj.citations)
+        ? obj.citations.map((c: any) => Number(c)).filter((n: any) => Number.isFinite(n))
+        : [],
+      notes: obj.notes ? String(obj.notes) : "",
+    };
+
+    return lesson;
+  } catch {
+    return null;
   }
-
-  // Keyword search over pages (simple, reliable demo baseline)
-  const words = q.split(/\s+/).filter((w) => w.length >= 3);
-
-  const scored = pdf.pages
-    .map((p) => {
-      const t = p.text.toLowerCase();
-      let score = 0;
-      for (const w of words) if (t.includes(w)) score += 1;
-      return { page: p.pageNumber, text: p.text, score };
-    })
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 2);
-
-  if (scored.length === 0) {
-    return `I couldn’t find that in this PDF.\n\nTry different keywords, or ask about a specific section.\n\n(Strict mode: I only answer from the uploaded PDF.)`;
-  }
-
-  const top = scored[0];
-  const excerpt = top.text.slice(0, 800).trim();
-
-  return `Best match I found:\n\n${excerpt}${top.text.length > 800 ? "…" : ""}\n\n📄 p.${top.page}`;
 }
 
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
+  const [lessonState, setLessonState] = useState<LessonState>({ status: "idle" });
 
-  const [chatInput, setChatInput] = useState("");
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([
-    { role: "tutor", text: "Upload a PDF, then ask me about it." },
-  ]);
+  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
+
+  const modelId =
+    (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "qwen2.5-7b-instruct";
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -82,13 +115,8 @@ export default function WhiteboardLesson() {
         setIndexState({ status: "error", message: "Please upload a PDF file." });
         return;
       }
-
-      setChatMessages((prev) => [
-        ...prev,
-        { role: "tutor", text: `Loading "${file.name}"…` },
-      ]);
-
       setIndexState({ status: "indexing", filename: file.name });
+      setLessonState({ status: "idle" });
 
       const pdf = await extractPdfText(file);
 
@@ -98,26 +126,11 @@ export default function WhiteboardLesson() {
         numPages: pdf.numPages,
         pdf,
       });
-
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: "tutor",
-          text: `Indexed ✅ (${pdf.numPages} pages). Ask me anything about this PDF.`,
-        },
-      ]);
     } catch (e: any) {
       setIndexState({
         status: "error",
         message: e?.message ?? "Failed to read PDF.",
       });
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: "tutor",
-          text: "Sorry — I couldn’t read that PDF. Try another file.",
-        },
-      ]);
     }
   };
 
@@ -131,39 +144,100 @@ export default function WhiteboardLesson() {
     e.preventDefault();
   };
 
-  const onSend = () => {
-    const q = chatInput.trim();
-    if (!q) return;
+  async function startLesson() {
+    if (indexState.status !== "indexed") return;
 
-    setChatMessages((prev) => [...prev, { role: "user", text: q }]);
-    setChatInput("");
-
-    if (indexState.status !== "indexed") {
-      setChatMessages((prev) => [
-        ...prev,
-        { role: "tutor", text: "Please upload a PDF first." },
-      ]);
+    if (!hasWebGPU()) {
+      setLessonState({
+        status: "error",
+        message:
+          "WebGPU not detected. This free demo uses in-browser AI (WebGPU). Try Chrome desktop on a supported laptop.",
+      });
       return;
     }
 
-    const answer = buildAnswerFromPdf(q, indexState.pdf);
-    setChatMessages((prev) => [...prev, { role: "tutor", text: answer }]);
-  };
+    const context = buildContextFromPdf(indexState.pdf);
+    const prompt = buildLessonPrompt({ explainLevel, context });
+
+    try {
+      setLessonState({ status: "loadingModel", message: "Loading model…" });
+
+      // generateText() internally loads engine, we update message via callback
+      const raw = await generateText(modelId, prompt, (msg) => {
+        setLessonState({ status: "loadingModel", message: msg });
+      });
+
+      setLessonState({ status: "generating", message: "Generating lesson…" });
+
+      const parsed = safeParseLesson(raw);
+      if (!parsed) {
+        setLessonState({
+          status: "error",
+          message: "Model output wasn’t valid JSON. Try again (or smaller PDF).",
+          raw,
+        });
+        return;
+      }
+
+      setLessonState({ status: "ready", lesson: parsed, raw });
+    } catch (e: any) {
+      setLessonState({
+        status: "error",
+        message: e?.message ?? "Failed to generate lesson.",
+      });
+    }
+  }
 
   return (
     <>
       <header className="app-header">
         <div className="brand">THAI ED-AI TUTOR</div>
 
-        <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
           <div className="mode-badge">
             <span>🔒 PDF Strict Mode</span>
           </div>
+
+          <div className="mode-badge" style={{ gap: 10 }}>
+            <span style={{ opacity: 0.75 }}>Explain:</span>
+            <button
+              className="video-btn"
+              style={{
+                padding: "6px 10px",
+                fontSize: "0.8rem",
+                background:
+                  explainLevel === "simple" ? "var(--primary-grad)" : "#E8F0FE",
+                color: explainLevel === "simple" ? "white" : "#2C3E50",
+              }}
+              onClick={() => setExplainLevel("simple")}
+            >
+              Simple
+            </button>
+            <button
+              className="video-btn"
+              style={{
+                padding: "6px 10px",
+                fontSize: "0.8rem",
+                background:
+                  explainLevel === "normal" ? "var(--primary-grad)" : "#E8F0FE",
+                color: explainLevel === "normal" ? "white" : "#2C3E50",
+              }}
+              onClick={() => setExplainLevel("normal")}
+            >
+              Normal
+            </button>
+          </div>
+
           <button
             className="video-btn"
-            onClick={() => alert("Video recap comes later")}
+            onClick={startLesson}
+            disabled={indexState.status !== "indexed"}
+            style={{
+              opacity: indexState.status === "indexed" ? 1 : 0.5,
+              cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
+            }}
           >
-            Generate Video Recap
+            Start Lesson
           </button>
         </div>
       </header>
@@ -208,18 +282,21 @@ export default function WhiteboardLesson() {
           />
 
           <div className="topic-list">
-            <h4>TOPICS FOUND</h4>
+            <h4>STATUS</h4>
             <ul>
-              {indexState.status === "indexed" ? (
-                <>
-                  <li>• Pages detected: {indexState.numPages}</li>
-                  <li>• Topic extraction comes next</li>
-                </>
-              ) : (
-                <>
-                  <li>• Upload a PDF to detect topics</li>
-                  <li>• Then start a lesson</li>
-                </>
+              <li>
+                • Model: <span style={{ opacity: 0.8 }}>{modelId}</span>
+              </li>
+              {lessonState.status === "idle" && <li>• Ready to start lesson</li>}
+              {lessonState.status === "loadingModel" && (
+                <li>• Loading: {lessonState.message}</li>
+              )}
+              {lessonState.status === "generating" && (
+                <li>• {lessonState.message}</li>
+              )}
+              {lessonState.status === "ready" && <li>• Lesson generated ✅</li>}
+              {lessonState.status === "error" && (
+                <li style={{ color: "#B91C1C" }}>• {lessonState.message}</li>
               )}
             </ul>
           </div>
@@ -228,62 +305,56 @@ export default function WhiteboardLesson() {
         {/* CENTER WHITEBOARD */}
         <main className="whiteboard-stage">
           <div className="whiteboard-surface">
-            {indexState.status !== "indexed" ? (
+            {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
-                  <strong>Upload a PDF to start.</strong>
-                  <div style={{ marginTop: 8, color: "#64748B", fontSize: 14 }}>
-                    After upload, this whiteboard will show teaching text +
-                    diagrams generated only from your PDF.
+                  <strong>
+                    {indexState.status === "indexed"
+                      ? "Ready. Click Start Lesson."
+                      : "Upload a PDF to start."}
+                  </strong>
+                  <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
+                    This demo runs AI on your laptop (WebGPU) and teaches from the
+                    PDF only.
                   </div>
                 </div>
 
                 <div className="diagram-box">
-                  [ Whiteboard area — waiting for PDF ]
+                  {indexState.status === "indexed"
+                    ? "[ Waiting to generate lesson… ]"
+                    : "[ Whiteboard area — waiting for PDF ]"}
                 </div>
               </>
             ) : (
               <>
                 <div className="lesson-chunk">
-                  <strong>PDF loaded.</strong>
-                  <div style={{ marginTop: 8, color: "#64748B", fontSize: 14 }}>
-                    Ask questions in the tutor chat. Next we’ll generate
-                    structured lesson text + diagrams with 📄 citations.
-                  </div>
+                  <strong>{lessonState.lesson.title}</strong>
+                  {lessonState.lesson.citations?.length > 0 && (
+                    <span
+                      className="source-pill"
+                      title="Pages used"
+                      style={{ marginLeft: 10 }}
+                    >
+                      📄 p.{lessonState.lesson.citations.join(", ")}
+                    </span>
+                  )}
                 </div>
 
-                <div className="diagram-box">[ Diagram area — coming next ]</div>
+                {lessonState.lesson.bullets.map((b, i) => (
+                  <div key={i} className="lesson-chunk" style={{ marginBottom: 14 }}>
+                    • {b}
+                  </div>
+                ))}
+
+                <DiagramPanel diagram={lessonState.lesson.diagram} />
+
+                {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
+                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
+                    Note: {lessonState.lesson.notes}
+                  </div>
+                )}
               </>
             )}
-          </div>
-
-          {/* MINI CHAT */}
-          <div className="chat-hub">
-            <div className="chat-title">Interactive Tutor Chat</div>
-
-            <div className="chat-messages">
-              {chatMessages.map((m, i) => (
-                <p key={i} style={{ marginTop: 0, marginBottom: 10 }}>
-                  <strong>{m.role === "user" ? "You" : "Tutor"}:</strong>{" "}
-                  {m.text}
-                </p>
-              ))}
-            </div>
-
-            <div className="chat-input">
-              <input
-                type="text"
-                placeholder="Ask a question..."
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onSend();
-                }}
-              />
-              <button className="btn-send" onClick={onSend}>
-                Send
-              </button>
-            </div>
           </div>
         </main>
 
@@ -293,26 +364,101 @@ export default function WhiteboardLesson() {
           <div className="evidence-content">
             <div className="quote-box">
               <em style={{ color: "#64748B" }}>
-                Evidence drawer will show quotes + page numbers after we add 📄
-                source chips to answers.
+                Next step: make each bullet/diagram clickable (📄) to show exact quotes
+                from the PDF pages used.
               </em>
             </div>
 
-            <button
-              className="view-pdf-btn"
-              onClick={() => alert("PDF page viewer comes next")}
-              disabled={indexState.status !== "indexed"}
-              style={{
-                opacity: indexState.status === "indexed" ? 1 : 0.5,
-                cursor:
-                  indexState.status === "indexed" ? "pointer" : "not-allowed",
-              }}
-            >
-              View Full PDF Page
-            </button>
+            {lessonState.status === "error" && lessonState.raw && (
+              <details>
+                <summary style={{ cursor: "pointer" }}>Show raw model output</summary>
+                <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                  {lessonState.raw}
+                </pre>
+              </details>
+            )}
           </div>
         </aside>
       </div>
     </>
+  );
+}
+
+function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
+  const width = 800;
+  const height = 260;
+
+  const nodes: PositionedNode[] = useMemo(
+    () => layoutRadial(diagram.nodes, width, height),
+    [diagram.nodes]
+  );
+
+  const nodeById = useMemo(() => {
+    const m = new Map<string, PositionedNode>();
+    nodes.forEach((n) => m.set(n.id, n));
+    return m;
+  }, [nodes]);
+
+  return (
+    <div className="diagram-box" style={{ height: 280, padding: 0 }}>
+      <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
+        {/* edges */}
+        {diagram.edges.map((e, idx) => {
+          const a = nodeById.get(e.from);
+          const b = nodeById.get(e.to);
+          if (!a || !b) return null;
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
+
+          return (
+            <g key={idx}>
+              <line
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke="#94A3B8"
+                strokeWidth={2}
+              />
+              {e.label ? (
+                <text
+                  x={mx}
+                  y={my}
+                  fontSize={12}
+                  fill="#64748B"
+                  textAnchor="middle"
+                >
+                  {e.label}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+
+        {/* nodes */}
+        {nodes.map((n) => (
+          <g key={n.id}>
+            <rect
+              x={n.x - 70}
+              y={n.y - 18}
+              width={140}
+              height={36}
+              rx={10}
+              fill="#FFFFFF"
+              stroke="#CBD5E0"
+            />
+            <text
+              x={n.x}
+              y={n.y + 4}
+              fontSize={13}
+              fill="#0F172A"
+              textAnchor="middle"
+            >
+              {n.label.length > 20 ? n.label.slice(0, 20) + "…" : n.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
   );
 }
