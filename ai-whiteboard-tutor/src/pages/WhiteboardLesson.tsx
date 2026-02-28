@@ -7,11 +7,64 @@ type IndexState =
   | { status: "indexed"; filename: string; numPages: number; pdf: ExtractedPdf }
   | { status: "error"; message: string };
 
+type ChatMsg = { role: "tutor" | "user"; text: string };
+
+function buildAnswerFromPdf(question: string, pdf: ExtractedPdf): string {
+  const q = question.toLowerCase().trim();
+
+  // "What is this PDF?" / summary-type questions
+  if (
+    q.includes("what is this") ||
+    q.includes("what's this") ||
+    q.includes("summar") ||
+    q.includes("overview") ||
+    q.includes("about this") ||
+    q === "what is this pdf" ||
+    q === "what is this pdf?"
+  ) {
+    const firstPages = pdf.pages.slice(0, Math.min(2, pdf.pages.length));
+    const combined = firstPages.map((p) => p.text).join("\n\n");
+    const snippet = combined.slice(0, 900).trim();
+
+    const pageNum = firstPages[0]?.pageNumber ?? 1;
+    return `Here’s what your PDF appears to be about (from the first pages):\n\n${snippet}${
+      combined.length > 900 ? "…" : ""
+    }\n\n📄 p.${pageNum}`;
+  }
+
+  // Keyword search over pages (simple, reliable demo baseline)
+  const words = q.split(/\s+/).filter((w) => w.length >= 3);
+
+  const scored = pdf.pages
+    .map((p) => {
+      const t = p.text.toLowerCase();
+      let score = 0;
+      for (const w of words) if (t.includes(w)) score += 1;
+      return { page: p.pageNumber, text: p.text, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 2);
+
+  if (scored.length === 0) {
+    return `I couldn’t find that in this PDF.\n\nTry different keywords, or ask about a specific section.\n\n(Strict mode: I only answer from the uploaded PDF.)`;
+  }
+
+  const top = scored[0];
+  const excerpt = top.text.slice(0, 800).trim();
+
+  return `Best match I found:\n\n${excerpt}${top.text.length > 800 ? "…" : ""}\n\n📄 p.${top.page}`;
+}
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [chatInput, setChatInput] = useState("");
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
+
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([
+    { role: "tutor", text: "Upload a PDF, then ask me about it." },
+  ]);
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -30,6 +83,11 @@ export default function WhiteboardLesson() {
         return;
       }
 
+      setChatMessages((prev) => [
+        ...prev,
+        { role: "tutor", text: `Loading "${file.name}"…` },
+      ]);
+
       setIndexState({ status: "indexing", filename: file.name });
 
       const pdf = await extractPdfText(file);
@@ -40,11 +98,26 @@ export default function WhiteboardLesson() {
         numPages: pdf.numPages,
         pdf,
       });
+
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "tutor",
+          text: `Indexed ✅ (${pdf.numPages} pages). Ask me anything about this PDF.`,
+        },
+      ]);
     } catch (e: any) {
       setIndexState({
         status: "error",
         message: e?.message ?? "Failed to read PDF.",
       });
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "tutor",
+          text: "Sorry — I couldn’t read that PDF. Try another file.",
+        },
+      ]);
     }
   };
 
@@ -59,14 +132,22 @@ export default function WhiteboardLesson() {
   };
 
   const onSend = () => {
-    const v = chatInput.trim();
-    if (!v) return;
+    const q = chatInput.trim();
+    if (!q) return;
+
+    setChatMessages((prev) => [...prev, { role: "user", text: q }]);
     setChatInput("");
-    alert(
-      indexState.status === "indexed"
-        ? `Demo: you asked "${v}". Next step is to answer from the PDF.`
-        : `Upload a PDF first. You asked "${v}".`
-    );
+
+    if (indexState.status !== "indexed") {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: "tutor", text: "Please upload a PDF first." },
+      ]);
+      return;
+    }
+
+    const answer = buildAnswerFromPdf(q, indexState.pdf);
+    setChatMessages((prev) => [...prev, { role: "tutor", text: answer }]);
   };
 
   return (
@@ -166,8 +247,8 @@ export default function WhiteboardLesson() {
                 <div className="lesson-chunk">
                   <strong>PDF loaded.</strong>
                   <div style={{ marginTop: 8, color: "#64748B", fontSize: 14 }}>
-                    Next step: generate the lesson content from your PDF (no fake
-                    demo text).
+                    Ask questions in the tutor chat. Next we’ll generate
+                    structured lesson text + diagrams with 📄 citations.
                   </div>
                 </div>
 
@@ -181,12 +262,12 @@ export default function WhiteboardLesson() {
             <div className="chat-title">Interactive Tutor Chat</div>
 
             <div className="chat-messages">
-              <p style={{ marginTop: 0 }}>
-                <strong>Tutor:</strong>{" "}
-                {indexState.status === "indexed"
-                  ? "Ask me about the PDF."
-                  : "Upload a PDF first."}
-              </p>
+              {chatMessages.map((m, i) => (
+                <p key={i} style={{ marginTop: 0, marginBottom: 10 }}>
+                  <strong>{m.role === "user" ? "You" : "Tutor"}:</strong>{" "}
+                  {m.text}
+                </p>
+              ))}
             </div>
 
             <div className="chat-input">
@@ -212,8 +293,8 @@ export default function WhiteboardLesson() {
           <div className="evidence-content">
             <div className="quote-box">
               <em style={{ color: "#64748B" }}>
-                No evidence yet. Upload a PDF and generate a lesson, then click
-                📄 icons to see quotes + page numbers here.
+                Evidence drawer will show quotes + page numbers after we add 📄
+                source chips to answers.
               </em>
             </div>
 
@@ -223,7 +304,8 @@ export default function WhiteboardLesson() {
               disabled={indexState.status !== "indexed"}
               style={{
                 opacity: indexState.status === "indexed" ? 1 : 0.5,
-                cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
+                cursor:
+                  indexState.status === "indexed" ? "pointer" : "not-allowed",
               }}
             >
               View Full PDF Page
