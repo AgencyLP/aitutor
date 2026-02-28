@@ -1,19 +1,6 @@
 import React, { useMemo, useRef, useState } from "react";
 import { extractPdfText, type ExtractedPdf } from "../rag/pdfExtract";
 
-type Evidence = {
-  quote: string;
-  meta: string;
-};
-
-const DEMO_EVIDENCE: Evidence[] = [
-  {
-    quote:
-      '"...the derivative of a function of a real variable measures the sensitivity to change of the function value with respect to a change in its argument..."',
-    meta: "Section 2.1, Page 12",
-  },
-];
-
 type IndexState =
   | { status: "idle" }
   | { status: "indexing"; filename: string }
@@ -21,17 +8,10 @@ type IndexState =
   | { status: "error"; message: string };
 
 export default function WhiteboardLesson() {
-  const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [chatInput, setChatInput] = useState("");
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
-
-  const selectedEvidence = useMemo(
-    () => DEMO_EVIDENCE[selectedEvidenceIndex] ?? DEMO_EVIDENCE[0],
-    [selectedEvidenceIndex]
-  );
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -82,7 +62,11 @@ export default function WhiteboardLesson() {
     const v = chatInput.trim();
     if (!v) return;
     setChatInput("");
-    alert(`Demo only (tutor logic next). You asked: ${v}`);
+    alert(
+      indexState.status === "indexed"
+        ? `Demo: you asked "${v}". Next step is to answer from the PDF.`
+        : `Upload a PDF first. You asked "${v}".`
+    );
   };
 
   return (
@@ -94,7 +78,12 @@ export default function WhiteboardLesson() {
           <div className="mode-badge">
             <span>🔒 PDF Strict Mode</span>
           </div>
-          <button className="video-btn">Generate Video Recap</button>
+          <button
+            className="video-btn"
+            onClick={() => alert("Video recap comes later")}
+          >
+            Generate Video Recap
+          </button>
         </div>
       </header>
 
@@ -115,6 +104,7 @@ export default function WhiteboardLesson() {
                 ? `PDF: ${indexState.filename}`
                 : "Click or drag PDF here"}
             </p>
+
             <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
@@ -132,7 +122,6 @@ export default function WhiteboardLesson() {
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) void handleFile(file);
-              // allow re-uploading same file
               e.currentTarget.value = "";
             }}
           />
@@ -140,14 +129,17 @@ export default function WhiteboardLesson() {
           <div className="topic-list">
             <h4>TOPICS FOUND</h4>
             <ul>
-              <li>
-                •{" "}
-                {indexState.status === "indexed"
-                  ? `Pages detected: ${indexState.numPages}`
-                  : "Upload a PDF to detect topics"}
-              </li>
-              <li>• (Topic extraction comes next)</li>
-              <li className="active">• The Derivative Concept ➔</li>
+              {indexState.status === "indexed" ? (
+                <>
+                  <li>• Pages detected: {indexState.numPages}</li>
+                  <li>• Topic extraction comes next</li>
+                </>
+              ) : (
+                <>
+                  <li>• Upload a PDF to detect topics</li>
+                  <li>• Then start a lesson</li>
+                </>
+              )}
             </ul>
           </div>
         </aside>
@@ -155,28 +147,32 @@ export default function WhiteboardLesson() {
         {/* CENTER WHITEBOARD */}
         <main className="whiteboard-stage">
           <div className="whiteboard-surface">
-            <div className="lesson-chunk">
-              <strong>The Derivative</strong> represents the instantaneous rate
-              of change of a function. Imagine a car moving along a curve; the
-              derivative at any point is its exact speed at that moment.
-              <span
-                className="source-pill"
-                onClick={() => setSelectedEvidenceIndex(0)}
-                role="button"
-                tabIndex={0}
-                title="View evidence"
-              >
-                📄 p. 12
-              </span>
-            </div>
+            {indexState.status !== "indexed" ? (
+              <>
+                <div className="lesson-chunk">
+                  <strong>Upload a PDF to start.</strong>
+                  <div style={{ marginTop: 8, color: "#64748B", fontSize: 14 }}>
+                    After upload, this whiteboard will show teaching text +
+                    diagrams generated only from your PDF.
+                  </div>
+                </div>
 
-            <div className="diagram-box">[ AI is drawing a slope diagram... ]</div>
+                <div className="diagram-box">
+                  [ Whiteboard area — waiting for PDF ]
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="lesson-chunk">
+                  <strong>PDF loaded.</strong>
+                  <div style={{ marginTop: 8, color: "#64748B", fontSize: 14 }}>
+                    Next step: generate the lesson content from your PDF (no fake
+                    demo text).
+                  </div>
+                </div>
 
-            {indexState.status === "indexed" && (
-              <div style={{ marginTop: 18, fontSize: 12, color: "#64748B" }}>
-                ✅ PDF loaded. Next step: retrieve relevant pages and replace this
-                demo text with real teaching from your PDF.
-              </div>
+                <div className="diagram-box">[ Diagram area — coming next ]</div>
+              </>
             )}
           </div>
 
@@ -186,7 +182,10 @@ export default function WhiteboardLesson() {
 
             <div className="chat-messages">
               <p style={{ marginTop: 0 }}>
-                <strong>Tutor:</strong> Upload a PDF, then ask me about it.
+                <strong>Tutor:</strong>{" "}
+                {indexState.status === "indexed"
+                  ? "Ask me about the PDF."
+                  : "Upload a PDF first."}
               </p>
             </div>
 
@@ -212,15 +211,20 @@ export default function WhiteboardLesson() {
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
             <div className="quote-box">
-              <em>{selectedEvidence.quote}</em>
-              <p style={{ marginTop: 10, fontSize: "0.75rem", color: "#64748B" }}>
-                {selectedEvidence.meta}
-              </p>
+              <em style={{ color: "#64748B" }}>
+                No evidence yet. Upload a PDF and generate a lesson, then click
+                📄 icons to see quotes + page numbers here.
+              </em>
             </div>
 
             <button
               className="view-pdf-btn"
-              onClick={() => alert("PDF overlay comes next")}
+              onClick={() => alert("PDF page viewer comes next")}
+              disabled={indexState.status !== "indexed"}
+              style={{
+                opacity: indexState.status === "indexed" ? 1 : 0.5,
+                cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
+              }}
             >
               View Full PDF Page
             </button>
