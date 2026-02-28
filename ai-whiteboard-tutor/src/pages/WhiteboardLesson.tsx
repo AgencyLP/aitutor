@@ -3,7 +3,7 @@ import { extractPdfText, type ExtractedPdf } from "../rag/pdfExtract";
 import { buildLessonPrompt, extractFirstJsonObject } from "../llm/prompts";
 import { generateText, hasWebGPU } from "../llm/webllmClient";
 import {
-  layoutRadial,
+  layoutStar,
   type ConceptMap,
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
@@ -462,4 +462,5 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
     </div>
   );
 }
+
 
