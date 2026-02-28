@@ -45,11 +45,9 @@ function safeParseLesson(text: string): Lesson | null {
   try {
     const obj = JSON.parse(candidate);
 
-    // Basic shape checks
     if (!obj || typeof obj !== "object") return null;
     if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
-    // Force expected types
     const lesson: Lesson = {
       title: String(obj.title),
       bullets: Array.isArray(obj.bullets)
@@ -91,6 +89,32 @@ function safeParseLesson(text: string): Lesson | null {
   }
 }
 
+// ---- VOICE (free, local) ----
+function speakText(text: string) {
+  if (!("speechSynthesis" in window)) return;
+
+  // Stop anything currently speaking
+  window.speechSynthesis.cancel();
+
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.rate = 1.0;
+  utter.pitch = 1.0;
+  utter.volume = 1.0;
+
+  // Prefer Thai voice if the browser has one, else English, else first available.
+  const voices = window.speechSynthesis.getVoices();
+  const preferThai =
+    voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
+  const preferEnglish =
+    voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
+
+  if (preferThai) utter.voice = preferThai;
+  else if (preferEnglish) utter.voice = preferEnglish;
+  else if (voices[0]) utter.voice = voices[0];
+
+  window.speechSynthesis.speak(utter);
+}
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -103,9 +127,13 @@ export default function WhiteboardLesson() {
     "simple"
   );
 
+  // Default to a smaller model for 8GB machines; can override via Netlify env var.
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
+
+  // voice controls
+  const [lastSpoken, setLastSpoken] = useState<string>("");
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -187,6 +215,11 @@ export default function WhiteboardLesson() {
       }
 
       setLessonState({ status: "ready", lesson: parsed, raw });
+
+      // Auto-speak after lesson generates
+      const speech = `${parsed.title}. ${parsed.bullets.join(" ")}`;
+      setLastSpoken(speech);
+      speakText(speech);
     } catch (e: any) {
       setLessonState({
         status: "error",
@@ -246,6 +279,35 @@ export default function WhiteboardLesson() {
             }}
           >
             Start Lesson
+          </button>
+
+          <button
+            className="video-btn"
+            onClick={() => window.speechSynthesis.cancel()}
+            style={{
+              padding: "6px 12px",
+              fontSize: "0.8rem",
+              background: "#E8F0FE",
+              color: "#2C3E50",
+            }}
+          >
+            Stop Voice
+          </button>
+
+          <button
+            className="video-btn"
+            onClick={() => lastSpoken && speakText(lastSpoken)}
+            disabled={!lastSpoken}
+            style={{
+              padding: "6px 12px",
+              fontSize: "0.8rem",
+              background: lastSpoken ? "var(--primary-grad)" : "#E8F0FE",
+              color: lastSpoken ? "white" : "#2C3E50",
+              opacity: lastSpoken ? 1 : 0.5,
+              cursor: lastSpoken ? "pointer" : "not-allowed",
+            }}
+          >
+            Replay Voice
           </button>
         </div>
       </header>
