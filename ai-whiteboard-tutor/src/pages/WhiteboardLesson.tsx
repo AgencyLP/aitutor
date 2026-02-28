@@ -97,7 +97,7 @@ export default function WhiteboardLesson() {
   const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
 
   const modelId =
-    (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "qwen2.5-7b-instruct";
+    (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "Qwen2.5-7B-Instruct-q4f32_1-MLC";
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -462,3 +462,4 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
     </div>
   );
 }
+
