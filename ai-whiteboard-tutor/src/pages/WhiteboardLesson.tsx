@@ -388,10 +388,10 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
   const width = 800;
   const height = 260;
 
-  const nodes: PositionedNode[] = useMemo(
-    () => layoutRadial(diagram.nodes, width, height),
-    [diagram.nodes]
-  );
+    const nodes: PositionedNode[] = useMemo(() => {
+       const cleaned = normalizeLabels(diagram.nodes).slice(0, 7);
+       return layoutStar(cleaned, width, height);
+   }, [diagram.nodes]);
 
   const nodeById = useMemo(() => {
     const m = new Map<string, PositionedNode>();
@@ -462,5 +462,6 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
     </div>
   );
 }
+
 
 
