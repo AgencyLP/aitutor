@@ -4,6 +4,7 @@ import { buildLessonPrompt, extractFirstJsonObject } from "../llm/prompts";
 import { generateText, hasWebGPU } from "../llm/webllmClient";
 import {
   layoutStar,
+  normalizeLabels,
   type ConceptMap,
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
@@ -77,7 +78,9 @@ function safeParseLesson(text: string): Lesson | null {
           : [],
       },
       citations: Array.isArray(obj.citations)
-        ? obj.citations.map((c: any) => Number(c)).filter((n: any) => Number.isFinite(n))
+        ? obj.citations
+            .map((c: any) => Number(c))
+            .filter((n: any) => Number.isFinite(n))
         : [],
       notes: obj.notes ? String(obj.notes) : "",
     };
@@ -92,12 +95,17 @@ export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
-  const [lessonState, setLessonState] = useState<LessonState>({ status: "idle" });
+  const [lessonState, setLessonState] = useState<LessonState>({
+    status: "idle",
+  });
 
-  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
+  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">(
+    "simple"
+  );
 
   const modelId =
-    (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "Qwen2.5-7B-Instruct-q4f32_1-MLC";
+    (import.meta as any).env?.VITE_WEBLLM_MODEL ??
+    "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -162,7 +170,6 @@ export default function WhiteboardLesson() {
     try {
       setLessonState({ status: "loadingModel", message: "Loading model…" });
 
-      // generateText() internally loads engine, we update message via callback
       const raw = await generateText(modelId, prompt, (msg) => {
         setLessonState({ status: "loadingModel", message: msg });
       });
@@ -234,7 +241,8 @@ export default function WhiteboardLesson() {
             disabled={indexState.status !== "indexed"}
             style={{
               opacity: indexState.status === "indexed" ? 1 : 0.5,
-              cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
+              cursor:
+                indexState.status === "indexed" ? "pointer" : "not-allowed",
             }}
           >
             Start Lesson
@@ -314,8 +322,8 @@ export default function WhiteboardLesson() {
                       : "Upload a PDF to start."}
                   </strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
-                    This demo runs AI on your laptop (WebGPU) and teaches from the
-                    PDF only.
+                    This demo runs AI on your laptop (WebGPU) and teaches from
+                    the PDF only.
                   </div>
                 </div>
 
@@ -341,18 +349,23 @@ export default function WhiteboardLesson() {
                 </div>
 
                 {lessonState.lesson.bullets.map((b, i) => (
-                  <div key={i} className="lesson-chunk" style={{ marginBottom: 14 }}>
+                  <div
+                    key={i}
+                    className="lesson-chunk"
+                    style={{ marginBottom: 14 }}
+                  >
                     • {b}
                   </div>
                 ))}
 
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
-                {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
-                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
-                    Note: {lessonState.lesson.notes}
-                  </div>
-                )}
+                {lessonState.lesson.notes &&
+                  lessonState.lesson.notes !== "string" && (
+                    <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
+                      Note: {lessonState.lesson.notes}
+                    </div>
+                  )}
               </>
             )}
           </div>
@@ -364,14 +377,16 @@ export default function WhiteboardLesson() {
           <div className="evidence-content">
             <div className="quote-box">
               <em style={{ color: "#64748B" }}>
-                Next step: make each bullet/diagram clickable (📄) to show exact quotes
-                from the PDF pages used.
+                Next step: make each bullet/diagram clickable (📄) to show exact
+                quotes from the PDF pages used.
               </em>
             </div>
 
             {lessonState.status === "error" && lessonState.raw && (
               <details>
-                <summary style={{ cursor: "pointer" }}>Show raw model output</summary>
+                <summary style={{ cursor: "pointer" }}>
+                  Show raw model output
+                </summary>
                 <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
                   {lessonState.raw}
                 </pre>
@@ -386,63 +401,38 @@ export default function WhiteboardLesson() {
 
 function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
   const width = 800;
-  const height = 260;
+  const height = 340;
 
-    const nodes: PositionedNode[] = useMemo(() => {
-       const cleaned = normalizeLabels(diagram.nodes).slice(0, 7);
-       return layoutStar(cleaned, width, height);
-   }, [diagram.nodes]);
-
-  const nodeById = useMemo(() => {
-    const m = new Map<string, PositionedNode>();
-    nodes.forEach((n) => m.set(n.id, n));
-    return m;
-  }, [nodes]);
+  const nodes: PositionedNode[] = useMemo(() => {
+    const cleaned = normalizeLabels(diagram.nodes).slice(0, 7);
+    return layoutStar(cleaned, width, height);
+  }, [diagram.nodes]);
 
   return (
-    <div className="diagram-box" style={{ height: 280, padding: 0 }}>
+    <div className="diagram-box" style={{ height: 320, padding: 0 }}>
       <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
-        {/* edges */}
-        {diagram.edges.map((e, idx) => {
-          const a = nodeById.get(e.from);
-          const b = nodeById.get(e.to);
-          if (!a || !b) return null;
-          const mx = (a.x + b.x) / 2;
-          const my = (a.y + b.y) / 2;
-
-          return (
-            <g key={idx}>
-              <line
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke="#94A3B8"
-                strokeWidth={2}
-              />
-              {e.label ? (
-                <text
-                  x={mx}
-                  y={my}
-                  fontSize={12}
-                  fill="#64748B"
-                  textAnchor="middle"
-                >
-                  {e.label}
-                </text>
-              ) : null}
-            </g>
-          );
-        })}
+        {/* edges (forced star: center -> others) */}
+        {nodes.length > 1 &&
+          nodes.slice(1).map((n, idx) => (
+            <line
+              key={idx}
+              x1={nodes[0].x}
+              y1={nodes[0].y}
+              x2={n.x}
+              y2={n.y}
+              stroke="#94A3B8"
+              strokeWidth={2}
+            />
+          ))}
 
         {/* nodes */}
         {nodes.map((n) => (
           <g key={n.id}>
             <rect
-              x={n.x - 70}
-              y={n.y - 18}
-              width={140}
-              height={36}
+              x={n.x - 75}
+              y={n.y - 19}
+              width={150}
+              height={38}
               rx={10}
               fill="#FFFFFF"
               stroke="#CBD5E0"
@@ -454,7 +444,7 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
               fill="#0F172A"
               textAnchor="middle"
             >
-              {n.label.length > 20 ? n.label.slice(0, 20) + "…" : n.label}
+              {n.label.length > 22 ? n.label.slice(0, 22) + "…" : n.label}
             </text>
           </g>
         ))}
@@ -462,6 +452,3 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
     </div>
   );
 }
-
-
-
