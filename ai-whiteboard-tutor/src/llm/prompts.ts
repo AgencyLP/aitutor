@@ -34,8 +34,10 @@ Return JSON in EXACTLY this schema:
 
 Constraints:
 - bullets: 5 to 9 items max
-- nodes: 4 to 7 nodes max
-- edges: 3 to 7 edges max
+- nodes: exactly 1 center node + 3 to 6 outer nodes
+- node labels: max 3 words AND max 22 characters
+- edges: star shape only: every edge MUST be from center node to an outer node
+- edge labels: optional, but if present max 2 words (you can also omit labels entirely)
 - citations: list of page numbers you used (from the context headings)
 
 PDF CONTEXT (with page numbers):
@@ -59,3 +61,4 @@ export function extractFirstJsonObject(text: string): string | null {
   }
   return null;
 }
+
