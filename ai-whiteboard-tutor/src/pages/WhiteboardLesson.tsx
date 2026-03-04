@@ -610,6 +610,43 @@ export default function WhiteboardLesson() {
                             fontSize: 12,
                             color: "#334155",
                           }}
+
+                          {useWeb && openWebIndex === i && b.webCites && b.webCites.length > 0 && (
+  <div
+    style={{
+      marginTop: 8,
+      marginLeft: 18,
+      padding: 10,
+      border: "1px solid #e5e7eb",
+      borderRadius: 10,
+      background: "#fff",
+      fontSize: 12,
+      color: "#334155",
+    }}
+  >
+    {b.webCites.map((w, idx) => (
+      <div
+        key={idx}
+        style={{
+          marginBottom: 10,
+          paddingBottom: 10,
+          borderBottom: "1px solid #f1f5f9",
+        }}
+      >
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <b>{w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}</b>
+          <span style={{ opacity: 0.85 }}>{w.title}</span>
+        </div>
+        <div style={{ opacity: 0.9, marginTop: 4 }}>{w.snippet}</div>
+        <div style={{ marginTop: 6 }}>
+          <a href={w.url} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>
+            Open source
+          </a>
+        </div>
+      </div>
+    ))}
+  </div>
+)}
                         >
                           {b.cites.map((c, idx) => {
                             const real = chunkMapRef.current.get(c.chunkId);
@@ -776,5 +813,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
