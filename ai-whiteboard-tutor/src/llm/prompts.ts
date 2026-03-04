@@ -1,13 +1,20 @@
-// ai-whiteboard-tutor/src/llm/prompts.ts
+type ExplainLevel = "simple" | "normal";
+type DiagramType = "concept_map" | "flowchart" | "timeline";
 
 export function buildLessonPrompt(params: {
-  explainLevel: "simple" | "normal";
+  explainLevel: ExplainLevel;
   evidence: Array<{ chunkId: string; page: number; text: string }>;
+  numPages: number;
 }) {
-  const levelInstr =
-    params.explainLevel === "simple"
-      ? "Explain simply for a beginner. Use short sentences and concrete examples."
-      : "Explain clearly with a bit more detail, still beginner-friendly.";
+  const isSimple = params.explainLevel === "simple";
+
+  // Controlled differences between modes:
+  const bulletMin = isSimple ? 5 : 6;
+  const bulletMax = isSimple ? 7 : 9;
+  const bulletCharCap = isSimple ? 110 : 160;
+  const notesCharCap = isSimple ? 140 : 220;
+
+  const requireDistinctPages = params.numPages >= 2 ? 2 : 1;
 
   const evidenceBlock = params.evidence
     .map((e) => `[[${e.chunkId} | p.${e.page}]]\n${e.text}`)
@@ -15,36 +22,41 @@ export function buildLessonPrompt(params: {
 
   return `
 You MUST follow these rules:
-- You are in STRICT PDF MODE. Use ONLY the EVIDENCE CHUNKS below.
-- If evidence is insufficient, say so in "notes" and do NOT invent facts.
-- Output MUST be valid JSON ONLY. No markdown. No extra commentary.
+- STRICT PDF MODE: use ONLY the EVIDENCE CHUNKS below.
+- Do NOT invent. If evidence is insufficient, say so in "notes".
+- Output MUST be valid JSON ONLY (no markdown, no prose).
+- IMPORTANT: citations must reference ONLY the provided chunkIds.
 
-Goal:
-Generate a short whiteboard lesson grounded in the PDF evidence.
-
-${levelInstr}
-
-Return JSON in EXACTLY this schema:
+Return JSON with EXACT schema:
 {
   "title": "string",
-  "bullets": ["string", "string", ...],
+  "bullets": ["string", ...],
   "diagram": {
-    "type": "concept_map",
+    "type": "concept_map" | "flowchart" | "timeline",
     "nodes": [{"id":"n1","label":"string"}, ...],
     "edges": [{"from":"n1","to":"n2","label":"string"}, ...]
   },
   "citations": [
-    { "page": 1, "chunkId": "p1_c1", "quote": "short exact quote from that chunk" }
+    { "page": 1, "chunkId": "p1_c1", "quote": "exact substring from that chunk (8–20 words)" }
   ],
   "notes": "string"
 }
 
 Constraints:
-- bullets: 5 to 9 items max
-- nodes: exactly 1 center node + 3 to 6 outer nodes
-- node labels: max 3 words AND max 22 characters
-- edges: star shape only: every edge MUST be from center node to an outer node
-- quote: MUST be a short substring copied from the cited chunk text (8–20 words)
+- bullets: ${bulletMin} to ${bulletMax} items
+- each bullet: <= ${bulletCharCap} characters
+- notes: <= ${notesCharCap} characters
+- diagram.type: choose the BEST of (concept_map, flowchart, timeline) for the content
+- nodes: 4 to 8 nodes total
+- edges: 3 to 10 edges total
+- node labels: <= 22 characters
+- citations: include at least ${requireDistinctPages} DISTINCT page(s) if available in the evidence
+- citations: 2 to 5 items
+- quote MUST be copied verbatim from the cited chunk text
+
+Quality rules:
+- Avoid vague wording. Prefer concrete terms from the PDF.
+- If you mention a number/stat, include a citation for it.
 
 EVIDENCE CHUNKS:
 ${evidenceBlock}
@@ -66,4 +78,24 @@ export function extractFirstJsonObject(text: string): string | null {
     if (depth === 0) return text.slice(start, i + 1);
   }
   return null;
+}
+
+/**
+ * Used only if JSON parsing fails: ask the model to rewrite into valid JSON.
+ */
+export function buildJsonRepairPrompt(badText: string) {
+  return `
+Rewrite the following into VALID JSON only (no markdown, no explanation).
+It MUST match this schema exactly:
+{
+  "title": "string",
+  "bullets": ["string", ...],
+  "diagram": { "type": "concept_map" | "flowchart" | "timeline", "nodes": [{"id":"n1","label":"string"}], "edges": [{"from":"n1","to":"n2","label":"string"}] },
+  "citations": [{ "page": 1, "chunkId": "p1_c1", "quote": "string" }],
+  "notes": "string"
+}
+
+TEXT:
+${badText}
+`.trim();
 }
