@@ -1,13 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 
-/**
- * ✅ Worker-free mode (no external fetch, no worker file needed)
- * This avoids: "Setting up fake worker failed: Failed to fetch dynamically imported module ..."
- */
-(pdfjsLib as any).disableWorker = true;
-(pdfjsLib as any).GlobalWorkerOptions.workerSrc = "";
-
 type HighlightBox = { left: number; top: number; width: number; height: number };
 
 type Props = {
@@ -15,7 +8,7 @@ type Props = {
   onClose: () => void;
   pdfData: ArrayBuffer | null;
   pageNumber: number;
-  highlightPhrase: string; // best effort
+  highlightPhrase: string;
   header?: string;
 };
 
@@ -34,10 +27,7 @@ export default function PdfCitationPreview({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [status, setStatus] = useState<string>("");
   const [boxes, setBoxes] = useState<HighlightBox[]>([]);
-  const [canvasSize, setCanvasSize] = useState<{ w: number; h: number }>({
-    w: 0,
-    h: 0,
-  });
+  const [canvasSize, setCanvasSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
   const wanted = useMemo(() => normalize(highlightPhrase), [highlightPhrase]);
 
@@ -57,8 +47,17 @@ export default function PdfCitationPreview({
       if (!canvasRef.current) return;
 
       try {
-        setStatus("Loading PDF…");
+        // ✅ Avoid worker issues: don't set any globals, just disable worker per-document
+        // Also, some builds require workerSrc to be a string; keep it empty safely.
+        try {
+          if ((pdfjsLib as any).GlobalWorkerOptions) {
+            (pdfjsLib as any).GlobalWorkerOptions.workerSrc = "";
+          }
+        } catch {
+          // ignore if read-only
+        }
 
+        setStatus("Loading PDF…");
         const loadingTask = (pdfjsLib as any).getDocument({
           data: pdfData,
           disableWorker: true,
@@ -70,11 +69,8 @@ export default function PdfCitationPreview({
         if (cancelled) return;
 
         const baseViewport = page.getViewport({ scale: 1.0 });
-        const targetWidth = 900; // looks good in your UI
-        const scale = Math.min(
-          2.0,
-          Math.max(1.0, targetWidth / baseViewport.width)
-        );
+        const targetWidth = 900;
+        const scale = Math.min(2.0, Math.max(1.0, targetWidth / baseViewport.width));
         const viewport = page.getViewport({ scale });
 
         const canvas = canvasRef.current!;
@@ -89,14 +85,13 @@ export default function PdfCitationPreview({
         await page.render({ canvasContext: ctx, viewport }).promise;
         if (cancelled) return;
 
-        // Highlight is best-effort. If no phrase, we’re done.
+        // If no phrase, done
         if (!wanted || wanted.length < 6) {
           setStatus("");
           return;
         }
 
         setStatus("Finding highlight…");
-
         const tc = await page.getTextContent();
         if (cancelled) return;
 
@@ -109,7 +104,6 @@ export default function PdfCitationPreview({
         const itemTexts = items.map((it) => normalize(it.str || ""));
         let bestRange: { start: number; end: number } | null = null;
 
-        // Search phrase across sequences of text items
         for (let start = 0; start < itemTexts.length; start++) {
           let joined = "";
           for (let end = start; end < Math.min(itemTexts.length, start + 70); end++) {
@@ -125,7 +119,6 @@ export default function PdfCitationPreview({
           if (bestRange) break;
         }
 
-        // fallback: shorter phrase
         if (!bestRange) {
           const shorter = wanted.split(" ").slice(0, 10).join(" ");
           if (shorter.length > 6) {
@@ -152,6 +145,11 @@ export default function PdfCitationPreview({
         }
 
         const util = (pdfjsLib as any).Util;
+        if (!util?.transform) {
+          setStatus("Highlight unavailable (pdfjs Util missing).");
+          return;
+        }
+
         const newBoxes: HighlightBox[] = [];
 
         for (let i = bestRange.start; i <= bestRange.end; i++) {
@@ -162,16 +160,11 @@ export default function PdfCitationPreview({
           const x = tx[4];
           const y = tx[5];
 
-          // Approx widths/heights (pdf.js gives width/height in text space)
           const w = (it.width ?? 0) * scale;
           const h = (it.height ?? 0) * scale || 12;
-
-          // Convert pdf coords to canvas coords
           const top = canvas.height - y - h;
 
-          if (w > 2 && h > 2) {
-            newBoxes.push({ left: x, top, width: w, height: h });
-          }
+          if (w > 2 && h > 2) newBoxes.push({ left: x, top, width: w, height: h });
         }
 
         setBoxes(newBoxes);
