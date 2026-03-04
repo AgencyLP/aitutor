@@ -14,6 +14,7 @@ import {
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
 import PdfCitationPreview from "../components/PdfCitationPreview";
+
 import { webSearchPool } from "../web/webSearch";
 import type { WebResult } from "../web/wikiSearch";
 
@@ -25,12 +26,7 @@ type IndexState =
 
 type Citation = { page: number; chunkId: string; quote: string };
 
-type Bullet = {
-  text: string;
-  cites: Citation[];
-  webCites?: WebResult[];
-  webLine?: string; // ✅ one web line per bullet
-};
+type Bullet = { text: string; cites: Citation[] };
 
 type Diagram = {
   type: "concept_map" | "flowchart" | "timeline";
@@ -52,10 +48,14 @@ type LessonState =
   | { status: "ready"; lesson: Lesson; raw: string }
   | { status: "error"; message: string; raw?: string };
 
+type WebPick = WebResult & { bulletIndex: number };
+
 function safeParseLesson(text: string): Lesson | null {
-  const candidate = extractFirstJsonObject(text) ?? extractFirstJsonObject("{" + text) ?? text;
+  const candidate =
+    extractFirstJsonObject(text) ?? extractFirstJsonObject("{" + text) ?? text;
   try {
     const obj = JSON.parse(candidate);
+
     if (!obj || typeof obj !== "object") return null;
     if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
@@ -125,9 +125,10 @@ function safeParseLesson(text: string): Lesson | null {
   }
 }
 
-// ---- VOICE ----
+// ---- VOICE (free, local) ----
 function speakText(text: string) {
   if (!("speechSynthesis" in window)) return;
+
   window.speechSynthesis.cancel();
 
   const utter = new SpeechSynthesisUtterance(text);
@@ -169,23 +170,42 @@ function snippetFromChunkText(chunkText: string) {
   return clean.slice(0, 220);
 }
 
+function scoreBulletToWeb(bulletText: string, r: WebResult) {
+  const a = tokenize(bulletText);
+  const b = tokenize((r.title + " " + r.snippet).slice(0, 300));
+  const setB = new Set(b);
+  let hit = 0;
+  for (const t of a) if (setB.has(t)) hit++;
+  return hit;
+}
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
-  const [lessonState, setLessonState] = useState<LessonState>({ status: "idle" });
+  const [lessonState, setLessonState] = useState<LessonState>({
+    status: "idle",
+  });
 
-  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
+  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">(
+    "simple"
+  );
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
+
   const [useWeb, setUseWeb] = useState<boolean>(false);
-  const [openWebIndex, setOpenWebIndex] = useState<number | null>(null);
   const [webStatus, setWebStatus] = useState<string>("");
-  const [webResults, setWebResults] = useState<WebResult[]>([]);
+  const [webPicks, setWebPicks] = useState<WebPick[]>([]);
 
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
-  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(new Map());
+  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(
+    new Map()
+  );
 
-  const [preview, setPreview] = useState<null | { page: number; chunkId: string; phrase: string }>(null);
+  const [preview, setPreview] = useState<null | {
+    page: number;
+    chunkId: string;
+    phrase: string;
+  }>(null);
 
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
@@ -196,7 +216,8 @@ export default function WhiteboardLesson() {
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
     if (indexState.status === "indexing") return "Indexing…";
-    if (indexState.status === "indexed") return `Indexed ✅ (${indexState.numPages} pages)`;
+    if (indexState.status === "indexed")
+      return `Indexed ✅ (${indexState.numPages} pages)`;
     return "Error";
   }, [indexState]);
 
@@ -213,6 +234,8 @@ export default function WhiteboardLesson() {
       setLessonState({ status: "idle" });
       setOpenBulletIndex(null);
       setPreview(null);
+      setWebStatus("");
+      setWebPicks([]);
 
       const bytes = await file.arrayBuffer();
       setPdfData(bytes);
@@ -226,7 +249,10 @@ export default function WhiteboardLesson() {
         pdf,
       });
     } catch (e: any) {
-      setIndexState({ status: "error", message: e?.message ?? "Failed to read PDF." });
+      setIndexState({
+        status: "error",
+        message: e?.message ?? "Failed to read PDF.",
+      });
     }
   };
 
@@ -236,7 +262,8 @@ export default function WhiteboardLesson() {
     if (file) await handleFile(file);
   };
 
-  const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) => e.preventDefault();
+  const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) =>
+    e.preventDefault();
 
   async function startLesson() {
     if (indexState.status !== "indexed") return;
@@ -250,9 +277,15 @@ export default function WhiteboardLesson() {
       return;
     }
 
-    const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
+    setWebStatus("");
+    setWebPicks([]);
 
-    // build chunk map for preview text
+    const allChunks = chunkPdfPages(indexState.pdf.pages, {
+      maxChars: 900,
+      overlapChars: 120,
+    });
+
+    // map for preview
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
@@ -260,7 +293,7 @@ export default function WhiteboardLesson() {
     const seedQuery =
       "summary key concepts definitions statistics findings implications conclusion";
 
-    // guarantee at least 1 chunk per page
+    // guarantee multi-page evidence
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -292,7 +325,11 @@ export default function WhiteboardLesson() {
       if (merged.length >= 10) break;
     }
 
-    const evidence = merged.map((c) => ({ chunkId: c.id, page: c.page, text: c.text }));
+    const evidence = merged.map((c) => ({
+      chunkId: c.id,
+      page: c.page,
+      text: c.text,
+    }));
 
     const prompt = buildLessonPrompt({
       explainLevel,
@@ -316,18 +353,18 @@ export default function WhiteboardLesson() {
         const repaired = await generateText(modelId, repairPrompt);
         parsed = safeParseLesson(repaired);
 
-        
         if (!parsed) {
-           setLessonState({
-             status: "error",
-             message: "Model output wasn’t valid JSON. Open raw output below (it includes the repaired attempt too).",
-             raw: raw + "\n\n----- REPAIRED ATTEMPT -----\n\n" + repaired,
+          setLessonState({
+            status: "error",
+            message:
+              "Model output wasn’t valid JSON. Open raw output below (it includes the repaired attempt too).",
+            raw: raw + "\n\n----- REPAIRED ATTEMPT -----\n\n" + repaired,
           });
           return;
-       }
-     }
+        }
+      }
 
-      // ✅ Re-rank citations per bullet & reduce repetition
+      // Re-rank citations per bullet & reduce repetition
       const usedChunkIds = new Set<string>();
       const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
@@ -354,85 +391,76 @@ export default function WhiteboardLesson() {
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
+
+      // ✅ Web: fetch and match per-bullet, display at bottom only
       if (useWeb) {
-  setWebStatus("Searching web…");
-  setWebResults([]);
+        try {
+          setWebStatus("Searching web…");
 
-  const titleQ = (parsed.title || "").trim();
-  const q1 = titleQ || "Artificial intelligence in education";
-  const q2 = "Educational technology";
-  const q3 = "Intelligent tutoring system";
-  const q4 = "EdTech market";
+          const titleQ = (parsed.title || "").trim();
+          const q1 = titleQ || "Artificial intelligence in education";
+          const q2 = "Educational technology";
+          const q3 = "Intelligent tutoring system";
+          const q4 = "EdTech market";
 
-  const pools = await Promise.all([
-    webSearchPool(q1),
-    webSearchPool(q2),
-    webSearchPool(q3),
-    webSearchPool(q4),
-  ]);
+          const pools = await Promise.all([
+            webSearchPool(q1),
+            webSearchPool(q2),
+            webSearchPool(q3),
+            webSearchPool(q4),
+          ]);
 
-  const merged: WebResult[] = [];
-  const seenUrls = new Set<string>();
-  for (const arr of pools) {
-    for (const r of arr) {
-      if (!r?.url) continue;
-      if (seenUrls.has(r.url)) continue;
-      seenUrls.add(r.url);
-      merged.push(r);
-    }
-  }
+          const mergedWeb: WebResult[] = [];
+          const seenUrls = new Set<string>();
+          for (const arr of pools) {
+            for (const r of arr) {
+              if (!r?.url) continue;
+              if (seenUrls.has(r.url)) continue;
+              seenUrls.add(r.url);
+              mergedWeb.push(r);
+            }
+          }
 
-  setWebResults(merged.slice(0, 12));
-  setWebStatus(`Web results: ${merged.length}`);
-} else {
-  setWebResults([]);
-  setWebStatus("");
-}
+          // pick best web result per bullet
+          const picks: WebPick[] = parsed.bullets
+            .map((b, i) => {
+              const ranked = [...mergedWeb]
+                .map((r) => ({ r, s: scoreBulletToWeb(b.text, r) }))
+                .sort((x, y) => y.s - x.s)
+                .map((x) => x.r);
 
-      if (useWeb) {
-  const queryBase = parsed.title || indexState.filename || "education";
-  const pool = await webSearchPool(queryBase);
+              const top = ranked[0];
+              return top
+                ? ({ ...top, bulletIndex: i } as WebPick)
+                : null;
+            })
+            .filter(Boolean) as WebPick[];
 
-  const score = (text: string, r: WebResult) => {
-    const a = tokenize(text);
-    const b2 = tokenize((r.title + " " + r.snippet).slice(0, 300));
-    const setB = new Set(b2);
-    let hit = 0;
-    for (const t of a) if (setB.has(t)) hit++;
-    return hit;
-  };
-
-  const bulletsWithWeb = parsed.bullets.map((b) => {
-    const ranked = [...pool]
-      .map((r) => ({ r, s: score(b.text, r) }))
-      .sort((x, y) => y.s - x.s)
-      .map((x) => x.r);
-
-    const top = ranked[0]; // best matching web result for THIS bullet
-    const webLine = top
-      ? `🌐 ${top.title} — ${String(top.snippet || "").slice(0, 180)}`
-      : "🌐 No web result found.";
-
-    return {
-      ...b,
-      webCites: ranked.slice(0, 2),
-      webLine,
-    };
-  });
-
-  parsed = { ...parsed, bullets: bulletsWithWeb };
-}
-           
+          setWebPicks(picks);
+          setWebStatus(`Web results: ${mergedWeb.length}`);
+        } catch (e: any) {
+          setWebPicks([]);
+          setWebStatus(`Web search failed: ${e?.message ?? "Unknown error"}`);
+        }
+      } else {
+        setWebPicks([]);
+        setWebStatus("");
+      }
 
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
       setPreview(null);
 
-      const speech = `${parsed.title}. ${parsed.bullets.map((b) => b.text).join(" ")}`;
+      const speech = `${parsed.title}. ${parsed.bullets
+        .map((b) => b.text)
+        .join(" ")}`;
       setLastSpoken(speech);
       speakText(speech);
     } catch (e: any) {
-      setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
+      setLessonState({
+        status: "error",
+        message: e?.message ?? "Failed to generate lesson.",
+      });
     }
   }
 
@@ -453,7 +481,10 @@ export default function WhiteboardLesson() {
               style={{
                 padding: "6px 10px",
                 fontSize: "0.8rem",
-                background: explainLevel === "simple" ? "var(--primary-grad)" : "#E8F0FE",
+                background:
+                  explainLevel === "simple"
+                    ? "var(--primary-grad)"
+                    : "#E8F0FE",
                 color: explainLevel === "simple" ? "white" : "#2C3E50",
               }}
               onClick={() => setExplainLevel("simple")}
@@ -465,7 +496,10 @@ export default function WhiteboardLesson() {
               style={{
                 padding: "6px 10px",
                 fontSize: "0.8rem",
-                background: explainLevel === "normal" ? "var(--primary-grad)" : "#E8F0FE",
+                background:
+                  explainLevel === "normal"
+                    ? "var(--primary-grad)"
+                    : "#E8F0FE",
                 color: explainLevel === "normal" ? "white" : "#2C3E50",
               }}
               onClick={() => setExplainLevel("normal")}
@@ -482,11 +516,11 @@ export default function WhiteboardLesson() {
               fontSize: "0.8rem",
               background: useWeb ? "var(--primary-grad)" : "#E8F0FE",
               color: useWeb ? "white" : "#2C3E50",
-             }}
-             title="Toggle web sources (Wikipedia + DuckDuckGo)"
+            }}
+            title="Toggle web sources (Wikipedia + DuckDuckGo)"
           >
-              {useWeb ? "🌐 PDF + Web" : "📄 PDF only"}
-              </button>
+            {useWeb ? "🌐 PDF + Web" : "📄 PDF only"}
+          </button>
 
           <button
             className="video-btn"
@@ -494,7 +528,8 @@ export default function WhiteboardLesson() {
             disabled={indexState.status !== "indexed"}
             style={{
               opacity: indexState.status === "indexed" ? 1 : 0.5,
-              cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
+              cursor:
+                indexState.status === "indexed" ? "pointer" : "not-allowed",
             }}
           >
             Start Lesson
@@ -532,6 +567,7 @@ export default function WhiteboardLesson() {
       </header>
 
       <div className="workspace">
+        {/* LEFT */}
         <aside className="drawer-left">
           <div
             className="upload-zone"
@@ -543,13 +579,17 @@ export default function WhiteboardLesson() {
             title="Click to upload or drag a PDF here"
           >
             <p style={{ margin: 0 }}>
-              {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
+              {indexState.status === "indexed"
+                ? `PDF: ${indexState.filename}`
+                : "Click or drag PDF here"}
             </p>
 
             <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
-              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
+              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>
+                {indexState.message}
+              </div>
             )}
           </div>
 
@@ -572,27 +612,38 @@ export default function WhiteboardLesson() {
                 • Model: <span style={{ opacity: 0.8 }}>{modelId}</span>
               </li>
               {lessonState.status === "idle" && <li>• Ready to start lesson</li>}
-              {lessonState.status === "loadingModel" && <li>• Loading: {lessonState.message}</li>}
-              {lessonState.status === "generating" && <li>• {lessonState.message}</li>}
+              {lessonState.status === "loadingModel" && (
+                <li>• Loading: {lessonState.message}</li>
+              )}
+              {lessonState.status === "generating" && (
+                <li>• {lessonState.message}</li>
+              )}
               {lessonState.status === "ready" && <li>• Lesson generated ✅</li>}
               {lessonState.status === "error" && (
                 <li style={{ color: "#B91C1C" }}>• {lessonState.message}</li>
               )}
+              {useWeb && webStatus && <li>• 🌐 {webStatus}</li>}
             </ul>
           </div>
         </aside>
 
+        {/* CENTER */}
         <main className="whiteboard-stage">
-        <div
-          className="whiteboard-surface"
-          style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}
-        >
+          <div
+            className="whiteboard-surface"
+            style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}
+          >
             {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
-                  <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
+                  <strong>
+                    {indexState.status === "indexed"
+                      ? "Ready. Click Start Lesson."
+                      : "Upload a PDF to start."}
+                  </strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
-                    This demo runs AI on your laptop (WebGPU) and teaches from the PDF only.
+                    This demo runs AI on your laptop (WebGPU) and teaches from
+                    the PDF only.
                   </div>
                 </div>
 
@@ -609,188 +660,168 @@ export default function WhiteboardLesson() {
                 </div>
 
                 {lessonState.lesson.bullets.map((b, i) => {
-  const openPdf = openBulletIndex === i;
-  const openWeb = openWebIndex === i;
+                  const openPdf = openBulletIndex === i;
 
-  return (
-    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-        <div style={{ marginTop: 2 }}>•</div>
-        <div style={{ flex: 1 }}>
-        {/* PDF answer line */}
-        <div>{b.text}</div>
+                  return (
+                    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ marginTop: 2 }}>•</div>
+                        <div style={{ flex: 1 }}>{b.text}</div>
 
-        {/* WEB answer line (only if web mode is on) */}
-        {useWeb && b.webLine && (
-           <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
-             {b.webLine}
-           </div>
-    )}
- </div>
+                        <button
+                          className="source-pill"
+                          title="Show PDF source + open preview"
+                          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
+                          onClick={() => {
+                            setOpenBulletIndex(openPdf ? null : i);
 
-        <button
-          className="source-pill"
-          title="Show PDF source + open preview"
-          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
-          onClick={() => {
-            setOpenBulletIndex(openPdf ? null : i);
+                            const first = b.cites?.[0];
+                            if (first) {
+                              const real = chunkMapRef.current.get(first.chunkId);
+                              const page = real?.page ?? first.page;
+                              const phrase = pickHighlightPhrase(real?.text ?? "");
+                              setPreview({ page, chunkId: first.chunkId, phrase });
+                            }
+                          }}
+                        >
+                          📄
+                        </button>
+                      </div>
 
-            const first = b.cites?.[0];
-            if (first) {
-              const real = chunkMapRef.current.get(first.chunkId);
-              const page = real?.page ?? first.page;
-              const phrase = pickHighlightPhrase(real?.text ?? "");
-              setPreview({ page, chunkId: first.chunkId, phrase });
-            }
-          }}
-        >
-          📄
-        </button>
-      </div>
+                      {openPdf && b.cites?.length > 0 && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            marginLeft: 18,
+                            padding: 10,
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 10,
+                            background: "#fff",
+                            fontSize: 12,
+                            color: "#334155",
+                          }}
+                        >
+                          {b.cites.map((c, idx) => {
+                            const real = chunkMapRef.current.get(c.chunkId);
+                            const page = real?.page ?? c.page;
+                            const phrase = pickHighlightPhrase(real?.text ?? "");
+                            return (
+                              <div
+                                key={idx}
+                                style={{
+                                  marginBottom: 10,
+                                  paddingBottom: 10,
+                                  borderBottom: "1px solid #f1f5f9",
+                                  cursor: "pointer",
+                                }}
+                                title="Click to open PDF preview + highlight"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPreview({ page, chunkId: c.chunkId, phrase });
+                                }}
+                              >
+                                <div>
+                                  <b>p.{page}</b> — <code>{c.chunkId}</code>
+                                </div>
+                                <div style={{ opacity: 0.9 }}>
+                                  "{phrase ? phrase + "…" : c.quote}"
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
 
-      {openPdf && b.cites?.length > 0 && (
-        <div
-          style={{
-            marginTop: 8,
-            marginLeft: 18,
-            padding: 10,
-            border: "1px solid #e5e7eb",
-            borderRadius: 10,
-            background: "#fff",
-            fontSize: 12,
-            color: "#334155",
-          }}
-        >
-          {b.cites.map((c, idx) => {
-            const real = chunkMapRef.current.get(c.chunkId);
-            const page = real?.page ?? c.page;
-            const phrase = pickHighlightPhrase(real?.text ?? "");
-            return (
-              <div
-                key={idx}
-                style={{
-                  marginBottom: 10,
-                  paddingBottom: 10,
-                  borderBottom: "1px solid #f1f5f9",
-                  cursor: "pointer",
-                }}
-                title="Click to open PDF preview + highlight"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setPreview({ page, chunkId: c.chunkId, phrase });
-                }}
-              >
-                <div>
-                  <b>p.{page}</b> — <code>{c.chunkId}</code>
-                </div>
-                <div style={{ opacity: 0.9 }}>
-                  "{phrase ? phrase + "…" : c.quote}"
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+                {/* WEB SECTION: below PDF bullets */}
+                {useWeb && (
+                  <div
+                    style={{
+                      marginTop: 16,
+                      padding: 14,
+                      borderRadius: 14,
+                      border: "1px solid #e5e7eb",
+                      background:
+                        "linear-gradient(180deg, #F0F9FF 0%, #FFFFFF 100%)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        marginBottom: 10,
+                      }}
+                    >
+                      <div style={{ fontWeight: 900 }}>🌐 Web Sources</div>
+                      {webStatus && (
+                        <div style={{ fontSize: 12, color: "#64748B" }}>
+                          {webStatus}
+                        </div>
+                      )}
+                    </div>
 
-        >
-          {b.webCites.map((w, idx) => (
-            <div
-              key={idx}
-              style={{
-                marginBottom: 10,
-                paddingBottom: 10,
-                borderBottom: "1px solid #f1f5f9",
-              }}
-            >
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <b>{w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}</b>
-                <span style={{ opacity: 0.85 }}>{w.title}</span>
-              </div>
-              <div style={{ opacity: 0.9, marginTop: 4 }}>{w.snippet}</div>
-              <div style={{ marginTop: 6 }}>
-                <a
-                  href={w.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "#2563eb" }}
-                >
-                  Open source
-                </a>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-})}
+                    {webPicks.length === 0 ? (
+                      <div style={{ color: "#64748B", fontSize: 13 }}>
+                        Nothing to show (web search returned no relevant results).
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        {webPicks.map((w, idx) => (
+                          <div
+                            key={idx}
+                            style={{
+                              padding: 10,
+                              borderRadius: 12,
+                              border: "1px solid #e2e8f0",
+                              background: "#ffffff",
+                            }}
+                          >
+                            <div style={{ fontSize: 12, color: "#334155", marginBottom: 6 }}>
+                              <b>Matches bullet #{w.bulletIndex + 1}</b>
+                            </div>
 
-{useWeb && (
-  <div
-    style={{
-      marginTop: 16,
-      padding: 14,
-      borderRadius: 14,
-      border: "1px solid #e5e7eb",
-      background: "linear-gradient(180deg, #F0F9FF 0%, #FFFFFF 100%)",
-    }}
-  >
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-      <div style={{ fontWeight: 800 }}>🌐 Web Sources</div>
-      {webStatus && <div style={{ fontSize: 12, color: "#64748B" }}>{webStatus}</div>}
-    </div>
+                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  padding: "2px 8px",
+                                  borderRadius: 999,
+                                  border: "1px solid #e2e8f0",
+                                  color: "#334155",
+                                }}
+                              >
+                                {w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}
+                              </div>
 
-    {webResults.length === 0 ? (
-      <div style={{ color: "#64748B", fontSize: 13 }}>
-        Nothing to show (web search returned no results).
-      </div>
-    ) : (
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {webResults.map((w, idx) => (
-          <div
-            key={idx}
-            style={{
-              padding: 10,
-              borderRadius: 12,
-              border: "1px solid #e2e8f0",
-              background: "#ffffff",
-            }}
-          >
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <div
-                style={{
-                  fontSize: 11,
-                  padding: "2px 8px",
-                  borderRadius: 999,
-                  border: "1px solid #e2e8f0",
-                  color: "#334155",
-                }}
-              >
-                {w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}
-              </div>
+                              <a
+                                href={w.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  color: "#2563eb",
+                                  fontWeight: 800,
+                                  textDecoration: "none",
+                                }}
+                              >
+                                {w.title}
+                              </a>
+                            </div>
 
-              <a
-                href={w.url}
-                target="_blank"
-                rel="noreferrer"
-                style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
-              >
-                {w.title}
-              </a>
-            </div>
+                            {w.snippet && (
+                              <div style={{ marginTop: 6, fontSize: 13, color: "#475569" }}>
+                                {w.snippet}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
-            {w.snippet && (
-              <div style={{ marginTop: 6, fontSize: 13, color: "#475569" }}>
-                {w.snippet}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    )}
-  </div>
-)}
-  
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
                 {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
@@ -803,6 +834,7 @@ export default function WhiteboardLesson() {
           </div>
         </main>
 
+        {/* RIGHT */}
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
@@ -815,7 +847,9 @@ export default function WhiteboardLesson() {
             {lessonState.status === "error" && lessonState.raw && (
               <details>
                 <summary style={{ cursor: "pointer" }}>Show raw model output</summary>
-                <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{lessonState.raw}</pre>
+                <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
+                  {lessonState.raw}
+                </pre>
               </details>
             )}
           </div>
@@ -828,7 +862,9 @@ export default function WhiteboardLesson() {
         pdfData={pdfData}
         pageNumber={preview?.page ?? 1}
         highlightPhrase={preview?.phrase ?? ""}
-        header={preview ? `PDF Preview — p.${preview.page} (${preview.chunkId})` : undefined}
+        header={
+          preview ? `PDF Preview — p.${preview.page} (${preview.chunkId})` : undefined
+        }
       />
     </>
   );
@@ -855,8 +891,25 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
             const y = startY + i * (boxH + gap);
             return (
               <g key={n.id ?? i}>
-                {i > 0 && <line x1={x} y1={y - gap} x2={x} y2={y} stroke="#94A3B8" strokeWidth={2} />}
-                <rect x={x - boxW / 2} y={y} width={boxW} height={boxH} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+                {i > 0 && (
+                  <line
+                    x1={x}
+                    y1={y - gap}
+                    x2={x}
+                    y2={y}
+                    stroke="#94A3B8"
+                    strokeWidth={2}
+                  />
+                )}
+                <rect
+                  x={x - boxW / 2}
+                  y={y}
+                  width={boxW}
+                  height={boxH}
+                  rx={10}
+                  fill="#FFFFFF"
+                  stroke="#CBD5E0"
+                />
                 <text x={x} y={y + 24} fontSize={13} fill="#0F172A" textAnchor="middle">
                   {String(n.label || "").slice(0, 22)}
                 </text>
@@ -884,9 +937,32 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
             const x = startX + i * (boxW + 20);
             return (
               <g key={n.id ?? i}>
-                {i > 0 && <line x1={x - 20} y1={y} x2={x} y2={y} stroke="#94A3B8" strokeWidth={2} />}
-                <rect x={x} y={y - boxH / 2} width={boxW} height={boxH} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
-                <text x={x + boxW / 2} y={y + 5} fontSize={13} fill="#0F172A" textAnchor="middle">
+                {i > 0 && (
+                  <line
+                    x1={x - 20}
+                    y1={y}
+                    x2={x}
+                    y2={y}
+                    stroke="#94A3B8"
+                    strokeWidth={2}
+                  />
+                )}
+                <rect
+                  x={x}
+                  y={y - boxH / 2}
+                  width={boxW}
+                  height={boxH}
+                  rx={10}
+                  fill="#FFFFFF"
+                  stroke="#CBD5E0"
+                />
+                <text
+                  x={x + boxW / 2}
+                  y={y + 5}
+                  fontSize={13}
+                  fill="#0F172A"
+                  textAnchor="middle"
+                >
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -907,12 +983,28 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
       <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
         {nodes.length > 1 &&
           nodes.slice(1).map((n, idx) => (
-            <line key={idx} x1={nodes[0].x} y1={nodes[0].y} x2={n.x} y2={n.y} stroke="#94A3B8" strokeWidth={2} />
+            <line
+              key={idx}
+              x1={nodes[0].x}
+              y1={nodes[0].y}
+              x2={n.x}
+              y2={n.y}
+              stroke="#94A3B8"
+              strokeWidth={2}
+            />
           ))}
 
         {nodes.map((n) => (
           <g key={n.id}>
-            <rect x={n.x - 75} y={n.y - 19} width={150} height={38} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+            <rect
+              x={n.x - 75}
+              y={n.y - 19}
+              width={150}
+              height={38}
+              rx={10}
+              fill="#FFFFFF"
+              stroke="#CBD5E0"
+            />
             <text x={n.x} y={n.y + 4} fontSize={13} fill="#0F172A" textAnchor="middle">
               {n.label.length > 22 ? n.label.slice(0, 22) + "…" : n.label}
             </text>
@@ -922,12 +1014,3 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
