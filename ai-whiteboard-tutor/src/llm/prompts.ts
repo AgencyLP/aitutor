@@ -1,3 +1,5 @@
+// ai-whiteboard-tutor/src/llm/prompts.ts
+
 export function buildLessonPrompt(params: {
   explainLevel: "simple" | "normal";
   evidence: Array<{ chunkId: string; page: number; text: string }>;
@@ -8,10 +10,7 @@ export function buildLessonPrompt(params: {
       : "Explain clearly with a bit more detail, still beginner-friendly.";
 
   const evidenceBlock = params.evidence
-    .map(
-      (e) =>
-        `[[${e.chunkId} | p.${e.page}]]\n${e.text}`
-    )
+    .map((e) => `[[${e.chunkId} | p.${e.page}]]\n${e.text}`)
     .join("\n\n");
 
   return `
@@ -52,9 +51,13 @@ ${evidenceBlock}
 `.trim();
 }
 
+/**
+ * Pull the first JSON object from an LLM response that may contain extra text.
+ */
 export function extractFirstJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   if (start === -1) return null;
+
   let depth = 0;
   for (let i = start; i < text.length; i++) {
     const ch = text[i];
@@ -64,22 +67,3 @@ export function extractFirstJsonObject(text: string): string | null {
   }
   return null;
 }
-
-export function extractFirstJsonObject(text: string): string | null {
-  // Tries to find the first {...} JSON object in a messy model output.
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-
-  let depth = 0;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === "{") depth++;
-    if (ch === "}") depth--;
-    if (depth === 0) {
-      return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-
