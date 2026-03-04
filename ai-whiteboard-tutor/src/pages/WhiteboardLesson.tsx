@@ -555,150 +555,143 @@ export default function WhiteboardLesson() {
                 </div>
 
                 {lessonState.lesson.bullets.map((b, i) => {
-                  const open = openBulletIndex === i;
-                  return (
-                    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                        <div style={{ marginTop: 2 }}>•</div>
-                        <div style={{ flex: 1 }}>{b.text}</div>
+  const openPdf = openBulletIndex === i;
+  const openWeb = openWebIndex === i;
 
-                        <button
-                          className="source-pill"
-                          title="Show PDF source + open preview"
-                          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
-                          onClick={() => {
-                            setOpenBulletIndex(open ? null : i);
+  return (
+    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <div style={{ marginTop: 2 }}>•</div>
+        <div style={{ flex: 1 }}>{b.text}</div>
 
-                            const first = b.cites?.[0];
-                            if (first) {
-                              const real = chunkMapRef.current.get(first.chunkId);
-                              const page = real?.page ?? first.page;
-                              const phrase = pickHighlightPhrase(real?.text ?? "");
-                              setPreview({ page, chunkId: first.chunkId, phrase });
-                            }
-                          }}
-                        >
-                          📄
-                        </button>
+        <button
+          className="source-pill"
+          title="Show PDF source + open preview"
+          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
+          onClick={() => {
+            setOpenBulletIndex(openPdf ? null : i);
 
-
-                        <button
-                         className="source-pill"
-                         title="Show web sources"
-                         style={{
-                         border: "none",
-                         cursor: useWeb ? "pointer" : "not-allowed",
-                         padding: "4px 8px",
-                         opacity: useWeb ? 1 : 0.4,
-                       }}
-                      disabled={!useWeb}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpenWebIndex(openWebIndex === i ? null : i);
-                      }}
-                    >
-                       🌐
-                    </button>
-                      </div>
-
-                      {open && b.cites?.length > 0 && (
-  <div
-    style={{
-      marginTop: 8,
-      marginLeft: 18,
-      padding: 10,
-      border: "1px solid #e5e7eb",
-      borderRadius: 10,
-      background: "#fff",
-      fontSize: 12,
-      color: "#334155",
-    }}
-  >
-    {b.cites.map((c, idx) => {
-      const real = chunkMapRef.current.get(c.chunkId);
-      const page = real?.page ?? c.page;
-      const phrase = pickHighlightPhrase(real?.text ?? "");
-      return (
-        <div
-          key={idx}
-          style={{
-            marginBottom: 10,
-            paddingBottom: 10,
-            borderBottom: "1px solid #f1f5f9",
-            cursor: "pointer",
-          }}
-          title="Click to open PDF preview + highlight"
-          onClick={(e) => {
-            e.stopPropagation();
-            setPreview({ page, chunkId: c.chunkId, phrase });
+            const first = b.cites?.[0];
+            if (first) {
+              const real = chunkMapRef.current.get(first.chunkId);
+              const page = real?.page ?? first.page;
+              const phrase = pickHighlightPhrase(real?.text ?? "");
+              setPreview({ page, chunkId: first.chunkId, phrase });
+            }
           }}
         >
-          <div>
-            <b>p.{page}</b> — <code>{c.chunkId}</code>
-          </div>
-          <div style={{ opacity: 0.9 }}>
-            "{phrase ? phrase + "…" : c.quote}"
-          </div>
-        </div>
-      );
-    })}
-  </div>
-)}
-        key={idx}
-        style={{
-          marginBottom: 10,
-          paddingBottom: 10,
-          borderBottom: "1px solid #f1f5f9",
-        }}
-      >
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <b>{w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}</b>
-          <span style={{ opacity: 0.85 }}>{w.title}</span>
-        </div>
-        <div style={{ opacity: 0.9, marginTop: 4 }}>{w.snippet}</div>
-        <div style={{ marginTop: 6 }}>
-          <a href={w.url} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>
-            Open source
-          </a>
-        </div>
+          📄
+        </button>
+
+        <button
+          className="source-pill"
+          title="Show web sources"
+          style={{
+            border: "none",
+            cursor: useWeb ? "pointer" : "not-allowed",
+            padding: "4px 8px",
+            opacity: useWeb ? 1 : 0.4,
+          }}
+          disabled={!useWeb}
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpenWebIndex(openWeb ? null : i);
+          }}
+        >
+          🌐
+        </button>
       </div>
-    ))}
-  </div>
-)}
-                        >
-                          {b.cites.map((c, idx) => {
-                            const real = chunkMapRef.current.get(c.chunkId);
-                            const page = real?.page ?? c.page;
-                            const phrase = pickHighlightPhrase(real?.text ?? "");
-                            return (
-                              <div
-                                key={idx}
-                                style={{
-                                  marginBottom: 10,
-                                  paddingBottom: 10,
-                                  borderBottom: "1px solid #f1f5f9",
-                                  cursor: "pointer",
-                                }}
-                                title="Click to open PDF preview + highlight"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPreview({ page, chunkId: c.chunkId, phrase });
-                                }}
-                              >
-                                <div>
-                                  <b>p.{page}</b> — <code>{c.chunkId}</code>
-                                </div>
-                                <div style={{ opacity: 0.9 }}>
-                                  "{phrase ? phrase + "…" : c.quote}"
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+
+      {openPdf && b.cites?.length > 0 && (
+        <div
+          style={{
+            marginTop: 8,
+            marginLeft: 18,
+            padding: 10,
+            border: "1px solid #e5e7eb",
+            borderRadius: 10,
+            background: "#fff",
+            fontSize: 12,
+            color: "#334155",
+          }}
+        >
+          {b.cites.map((c, idx) => {
+            const real = chunkMapRef.current.get(c.chunkId);
+            const page = real?.page ?? c.page;
+            const phrase = pickHighlightPhrase(real?.text ?? "");
+            return (
+              <div
+                key={idx}
+                style={{
+                  marginBottom: 10,
+                  paddingBottom: 10,
+                  borderBottom: "1px solid #f1f5f9",
+                  cursor: "pointer",
+                }}
+                title="Click to open PDF preview + highlight"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPreview({ page, chunkId: c.chunkId, phrase });
+                }}
+              >
+                <div>
+                  <b>p.{page}</b> — <code>{c.chunkId}</code>
+                </div>
+                <div style={{ opacity: 0.9 }}>
+                  "{phrase ? phrase + "…" : c.quote}"
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {useWeb && openWeb && b.webCites && b.webCites.length > 0 && (
+        <div
+          style={{
+            marginTop: 8,
+            marginLeft: 18,
+            padding: 10,
+            border: "1px solid #e5e7eb",
+            borderRadius: 10,
+            background: "#fff",
+            fontSize: 12,
+            color: "#334155",
+          }}
+        >
+          {b.webCites.map((w, idx) => (
+            <div
+              key={idx}
+              style={{
+                marginBottom: 10,
+                paddingBottom: 10,
+                borderBottom: "1px solid #f1f5f9",
+              }}
+            >
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <b>{w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}</b>
+                <span style={{ opacity: 0.85 }}>{w.title}</span>
+              </div>
+              <div style={{ opacity: 0.9, marginTop: 4 }}>{w.snippet}</div>
+              <div style={{ marginTop: 6 }}>
+                <a
+                  href={w.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "#2563eb" }}
+                >
+                  Open source
+                </a>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+})}
+
+                
 
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
@@ -831,6 +824,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
