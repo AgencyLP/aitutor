@@ -58,9 +58,23 @@ type WebSummary = {
   source: string; // keep generic to avoid TS union mismatch
 };
 
+function extractBetween(text: string, startTag: string, endTag: string) {
+  const a = text.indexOf(startTag);
+  const b = text.indexOf(endTag);
+  if (a === -1 || b === -1 || b <= a) return null;
+  return text.slice(a + startTag.length, b).trim();
+}
+
 function safeParseLesson(text: string): Lesson | null {
+  // 1) Prefer JSON markers if model outputs them
+  const marked = extractBetween(text, "JSON_START", "JSON_END");
+
+  // 2) Fallback to first JSON object grab
   const candidate =
-    extractFirstJsonObject(text) ?? extractFirstJsonObject("{" + text) ?? text;
+    marked ??
+    extractFirstJsonObject(text) ??
+    extractFirstJsonObject("{" + text) ??
+    text;
 
   try {
     const obj = JSON.parse(candidate);
@@ -383,10 +397,15 @@ export default function WhiteboardLesson() {
       numPages: indexState.numPages,
     });
 
+    const promptWithMarkers =
+       "Return ONLY JSON between markers.\nJSON_START\n" +
+        prompt +
+       "\nJSON_END";
+
     try {
       setLessonState({ status: "loadingModel", message: "Loading model…" });
 
-      const raw = await generateText(modelId, prompt, (msg) => {
+      const raw = await generateText(modelId, promptWithMarkers, (msg) => {
         setLessonState({ status: "loadingModel", message: msg });
       });
 
@@ -998,4 +1017,5 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
