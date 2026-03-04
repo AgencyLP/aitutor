@@ -592,7 +592,10 @@ export default function WhiteboardLesson() {
                          opacity: useWeb ? 1 : 0.4,
                        }}
                       disabled={!useWeb}
-                      onClick={() => setOpenWebIndex(openWebIndex === i ? null : i)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenWebIndex(openWebIndex === i ? null : i);
+                      }}
                     >
                        🌐
                     </button>
@@ -813,6 +816,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
