@@ -9,17 +9,24 @@ import {
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
 
+// ✅ NEW: chunk + retrieve evidence from PDF
+import { chunkPdfPages } from "../rag/chunking";
+import { retrieveTopChunks } from "../rag/retriever";
+
 type IndexState =
   | { status: "idle" }
   | { status: "indexing"; filename: string }
   | { status: "indexed"; filename: string; numPages: number; pdf: ExtractedPdf }
   | { status: "error"; message: string };
 
+// ✅ NEW: structured citations
+type Citation = { page: number; chunkId: string; quote: string };
+
 type Lesson = {
   title: string;
   bullets: string[];
   diagram: ConceptMap;
-  citations: number[];
+  citations: Citation[]; // ✅ was number[]
   notes?: string;
 };
 
@@ -30,15 +37,7 @@ type LessonState =
   | { status: "ready"; lesson: Lesson; raw: string }
   | { status: "error"; message: string; raw?: string };
 
-function buildContextFromPdf(pdf: ExtractedPdf) {
-  // Keep it short so local models don’t choke: first 2 pages, truncated.
-  const pages = pdf.pages.slice(0, Math.min(2, pdf.pages.length));
-  const parts = pages.map((p) => {
-    const trimmed = p.text.slice(0, 2500);
-    return `--- PAGE ${p.pageNumber} ---\n${trimmed}`;
-  });
-  return parts.join("\n\n");
-}
+// ❌ REMOVED: buildContextFromPdf (we now retrieve evidence chunks instead)
 
 function safeParseLesson(text: string): Lesson | null {
   const candidate = extractFirstJsonObject(text) ?? text;
@@ -75,11 +74,21 @@ function safeParseLesson(text: string): Lesson | null {
               .slice(0, 7)
           : [],
       },
+
+      // ✅ NEW: parse citation objects instead of page numbers
       citations: Array.isArray(obj.citations)
         ? obj.citations
-            .map((c: any) => Number(c))
-            .filter((n: any) => Number.isFinite(n))
+            .map((c: any) => ({
+              page: Number(c?.page),
+              chunkId: String(c?.chunkId ?? ""),
+              quote: String(c?.quote ?? ""),
+            }))
+            .filter(
+              (c: any) =>
+                Number.isFinite(c.page) && c.page > 0 && c.chunkId && c.quote
+            )
         : [],
+
       notes: obj.notes ? String(obj.notes) : "",
     };
 
@@ -93,7 +102,6 @@ function safeParseLesson(text: string): Lesson | null {
 function speakText(text: string) {
   if (!("speechSynthesis" in window)) return;
 
-  // Stop anything currently speaking
   window.speechSynthesis.cancel();
 
   const utter = new SpeechSynthesisUtterance(text);
@@ -101,7 +109,6 @@ function speakText(text: string) {
   utter.pitch = 1.0;
   utter.volume = 1.0;
 
-  // Prefer Thai voice if the browser has one, else English, else first available.
   const voices = window.speechSynthesis.getVoices();
   const preferThai =
     voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
@@ -127,12 +134,10 @@ export default function WhiteboardLesson() {
     "simple"
   );
 
-  // Default to a smaller model for 8GB machines; can override via Netlify env var.
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
-  // voice controls
   const [lastSpoken, setLastSpoken] = useState<string>("");
 
   const statusBadge = useMemo(() => {
@@ -192,8 +197,25 @@ export default function WhiteboardLesson() {
       return;
     }
 
-    const context = buildContextFromPdf(indexState.pdf);
-    const prompt = buildLessonPrompt({ explainLevel, context });
+    // ✅ NEW: build evidence from PDF chunks + retrieval
+    const allChunks = chunkPdfPages(indexState.pdf.pages, {
+      maxChars: 900,
+      overlapChars: 120,
+    });
+
+    // This seed query is just for “start lesson”.
+    // Later, use the user’s question as the query.
+    const seedQuery =
+      "summary main ideas key concepts definitions important points";
+
+    const top = retrieveTopChunks(seedQuery, allChunks, 6);
+    const evidence = top.map((c) => ({
+      chunkId: c.id,
+      page: c.page,
+      text: c.text,
+    }));
+
+    const prompt = buildLessonPrompt({ explainLevel, evidence });
 
     try {
       setLessonState({ status: "loadingModel", message: "Loading model…" });
@@ -216,7 +238,6 @@ export default function WhiteboardLesson() {
 
       setLessonState({ status: "ready", lesson: parsed, raw });
 
-      // Auto-speak after lesson generates
       const speech = `${parsed.title}. ${parsed.bullets.join(" ")}`;
       setLastSpoken(speech);
       speakText(speech);
@@ -399,13 +420,21 @@ export default function WhiteboardLesson() {
               <>
                 <div className="lesson-chunk">
                   <strong>{lessonState.lesson.title}</strong>
+
+                  {/* ✅ UPDATED: show evidence pages from citation objects */}
                   {lessonState.lesson.citations?.length > 0 && (
                     <span
                       className="source-pill"
-                      title="Pages used"
+                      title="Evidence used"
                       style={{ marginLeft: 10 }}
                     >
-                      📄 p.{lessonState.lesson.citations.join(", ")}
+                      📄{" "}
+                      {Array.from(
+                        new Set(lessonState.lesson.citations.map((c) => c.page))
+                      )
+                        .sort((a, b) => a - b)
+                        .map((p) => `p.${p}`)
+                        .join(", ")}
                     </span>
                   )}
                 </div>
@@ -437,12 +466,36 @@ export default function WhiteboardLesson() {
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
-            <div className="quote-box">
-              <em style={{ color: "#64748B" }}>
-                Next step: make each bullet/diagram clickable (📄) to show exact
-                quotes from the PDF pages used.
-              </em>
-            </div>
+            {/* ✅ UPDATED: show real citations */}
+            {lessonState.status === "ready" &&
+              lessonState.lesson.citations.length > 0 && (
+                <div className="quote-box">
+                  {lessonState.lesson.citations.map((c, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        marginBottom: 10,
+                        paddingBottom: 10,
+                        borderBottom: "1px solid #eee",
+                      }}
+                    >
+                      <div>
+                        <b>p.{c.page}</b> — <code>{c.chunkId}</code>
+                      </div>
+                      <div style={{ opacity: 0.9 }}>"{c.quote}"</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            {lessonState.status !== "ready" && (
+              <div className="quote-box">
+                <em style={{ color: "#64748B" }}>
+                  Upload a PDF and click Start Lesson to generate evidence-backed
+                  citations.
+                </em>
+              </div>
+            )}
 
             {lessonState.status === "error" && lessonState.raw && (
               <details>
@@ -473,7 +526,6 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
   return (
     <div className="diagram-box" style={{ height: 320, padding: 0 }}>
       <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
-        {/* edges (forced star: center -> others) */}
         {nodes.length > 1 &&
           nodes.slice(1).map((n, idx) => (
             <line
@@ -487,7 +539,6 @@ function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
             />
           ))}
 
-        {/* nodes */}
         {nodes.map((n) => (
           <g key={n.id}>
             <rect
