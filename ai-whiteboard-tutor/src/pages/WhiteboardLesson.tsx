@@ -46,7 +46,7 @@ type LessonState =
   | { status: "error"; message: string; raw?: string };
 
 function safeParseLesson(text: string): Lesson | null {
-  const candidate = extractFirstJsonObject(text) ?? text;
+  const candidate = extractFirstJsonObject(text) ?? extractFirstJsonObject("{" + text) ?? text;
   try {
     const obj = JSON.parse(candidate);
     if (!obj || typeof obj !== "object") return null;
@@ -296,15 +296,16 @@ export default function WhiteboardLesson() {
         const repaired = await generateText(modelId, repairPrompt);
         parsed = safeParseLesson(repaired);
 
+        
         if (!parsed) {
-          setLessonState({
-            status: "error",
-            message: "Model output wasn’t valid JSON. Try again (or smaller PDF).",
-            raw,
+           setLessonState({
+             status: "error",
+             message: "Model output wasn’t valid JSON. Open raw output below (it includes the repaired attempt too).",
+             raw: raw + "\n\n----- REPAIRED ATTEMPT -----\n\n" + repaired,
           });
           return;
-        }
-      }
+       }
+     }
 
       // ✅ Re-rank citations per bullet & reduce repetition
       const usedChunkIds = new Set<string>();
@@ -707,3 +708,4 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
