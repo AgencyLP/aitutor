@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import * as pdfjsLib from "pdfjs-dist/build/pdf";
-import workerSrc from "pdfjs-dist/build/pdf.worker?url";
+import * as pdfjsLib from "pdfjs-dist";
 
-(pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerSrc;
+(pdfjsLib as any).GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${(pdfjsLib as any).version}/build/pdf.worker.min.js`;
 
 type HighlightBox = { left: number; top: number; width: number; height: number };
 
@@ -92,7 +91,6 @@ export default function PdfCitationPreview({
         const itemTexts = items.map((it) => normalize(it.str || ""));
         let bestRange: { start: number; end: number } | null = null;
 
-        // Try match phrase across sequences of text items
         for (let start = 0; start < itemTexts.length; start++) {
           let joined = "";
           for (let end = start; end < Math.min(itemTexts.length, start + 70); end++) {
@@ -108,7 +106,6 @@ export default function PdfCitationPreview({
           if (bestRange) break;
         }
 
-        // fallback: shorter phrase (first 10 words)
         if (!bestRange) {
           const shorter = wanted.split(" ").slice(0, 10).join(" ");
           if (shorter.length > 6) {
