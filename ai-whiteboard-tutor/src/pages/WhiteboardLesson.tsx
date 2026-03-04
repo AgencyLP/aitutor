@@ -384,7 +384,6 @@ const fixedBullets = parsed.bullets.map((b) => {
   return { ...b, cites };
 });
 
-parsed = { ...parsed, bullets: fixedBullets };
 
       parsed = { ...parsed, bullets: fixedBullets };
 
@@ -653,11 +652,10 @@ parsed = { ...parsed, bullets: fixedBullets };
                                 }}
                                 title="Click to open PDF preview + highlight"
                                 onClick={() =>
-
-                               onClick={(e) => {
-                               e.stopPropagation();
-                               setPreview({ page, chunkId: c.chunkId, phrase });
-                               }}
+                                onClick={(e) => {
+                                 e.stopPropagation();
+                                 setPreview({ page, chunkId: c.chunkId, phrase });
+                              }}     
                               >
                                 <div>
                                   <b>p.{page}</b> — <code>{c.chunkId}</code>
@@ -888,6 +886,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
