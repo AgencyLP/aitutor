@@ -14,6 +14,8 @@ import {
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
 import PdfCitationPreview from "../components/PdfCitationPreview";
+import { webSearchPool } from "../web/webSearch";
+import type { WebResult } from "../web/wikiSearch";
 
 type IndexState =
   | { status: "idle" }
@@ -23,7 +25,7 @@ type IndexState =
 
 type Citation = { page: number; chunkId: string; quote: string };
 
-type Bullet = { text: string; cites: Citation[] };
+type Bullet = { text: string; cites: Citation[]; webCites?: WebResult[] };
 
 type Diagram = {
   type: "concept_map" | "flowchart" | "timeline";
@@ -141,6 +143,15 @@ function speakText(text: string) {
   window.speechSynthesis.speak(utter);
 }
 
+function tokenize(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9ก-๙\s]/g, " ")
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 2);
+}
+
 function pickHighlightPhrase(chunkText: string) {
   const clean = (chunkText || "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
@@ -161,6 +172,8 @@ export default function WhiteboardLesson() {
 
   const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
+  const [useWeb, setUseWeb] = useState<boolean>(false);
+  const [openWebIndex, setOpenWebIndex] = useState<number | null>(null);
 
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
   const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(new Map());
@@ -335,6 +348,31 @@ export default function WhiteboardLesson() {
 
       parsed = { ...parsed, bullets: fixedBullets };
 
+      if (useWeb) {
+         const queryBase = parsed.title || indexState.filename || "education";
+         const pool = await webSearchPool(queryBase);
+
+         const score = (text: string, r: WebResult) => {
+           const a = tokenize(text);
+           const b = tokenize((r.title + " " + r.snippet).slice(0, 300));
+          const setB = new Set(b);
+          let hit = 0;
+          for (const t of a) if (setB.has(t)) hit++;
+          return hit;
+  };
+
+  const bulletsWithWeb = parsed.bullets.map((b) => {
+    const ranked = [...pool]
+      .map((r) => ({ r, s: score(b.text, r) }))
+      .sort((x, y) => y.s - x.s)
+      .map((x) => x.r);
+
+    return { ...b, webCites: ranked.slice(0, 2) };
+  });
+
+  parsed = { ...parsed, bullets: bulletsWithWeb };
+}
+
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
       setPreview(null);
@@ -384,6 +422,20 @@ export default function WhiteboardLesson() {
               Normal
             </button>
           </div>
+
+          <button
+            className="video-btn"
+            onClick={() => setUseWeb((v) => !v)}
+            style={{
+              padding: "6px 12px",
+              fontSize: "0.8rem",
+              background: useWeb ? "var(--primary-grad)" : "#E8F0FE",
+              color: useWeb ? "white" : "#2C3E50",
+             }}
+             title="Toggle web sources (Wikipedia + DuckDuckGo)"
+          >
+              {useWeb ? "🌐 PDF + Web" : "📄 PDF only"}
+              </button>
 
           <button
             className="video-btn"
@@ -528,6 +580,22 @@ export default function WhiteboardLesson() {
                         >
                           📄
                         </button>
+
+
+                        <button
+                         className="source-pill"
+                         title="Show web sources"
+                         style={{
+                         border: "none",
+                         cursor: useWeb ? "pointer" : "not-allowed",
+                         padding: "4px 8px",
+                         opacity: useWeb ? 1 : 0.4,
+                       }}
+                      disabled={!useWeb}
+                      onClick={() => setOpenWebIndex(openWebIndex === i ? null : i)}
+                    >
+                       🌐
+                    </button>
                       </div>
 
                       {open && b.cites?.length > 0 && (
@@ -708,4 +776,5 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
