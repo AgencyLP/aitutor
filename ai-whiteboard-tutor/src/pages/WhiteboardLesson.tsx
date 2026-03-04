@@ -7,7 +7,7 @@ import {
 } from "../llm/prompts";
 import { generateText, hasWebGPU } from "../llm/webllmClient";
 import { chunkPdfPages } from "../rag/chunking";
-import { retrieveTopChunksDiverse } from "../rag/retriever";
+import { retrieveTopChunks, retrieveTopChunksDiverse } from "../rag/retriever";
 import {
   layoutStar,
   normalizeLabels,
@@ -22,6 +22,11 @@ type IndexState =
 
 type Citation = { page: number; chunkId: string; quote: string };
 
+type Bullet = {
+  text: string;
+  cites: Citation[];
+};
+
 type Diagram = {
   type: "concept_map" | "flowchart" | "timeline";
   nodes: Array<{ id: string; label: string }>;
@@ -30,9 +35,8 @@ type Diagram = {
 
 type Lesson = {
   title: string;
-  bullets: string[];
+  bullets: Bullet[];
   diagram: Diagram;
-  citations: Citation[];
   notes?: string;
 };
 
@@ -56,11 +60,33 @@ function safeParseLesson(text: string): Lesson | null {
         ? obj.diagram.type
         : "concept_map";
 
+    const bullets: Bullet[] = Array.isArray(obj.bullets)
+      ? obj.bullets
+          .map((b: any) => ({
+            text: String(b?.text ?? ""),
+            cites: Array.isArray(b?.cites)
+              ? b.cites
+                  .map((c: any) => ({
+                    page: Number(c?.page),
+                    chunkId: String(c?.chunkId ?? ""),
+                    quote: String(c?.quote ?? ""),
+                  }))
+                  .filter(
+                    (c: any) =>
+                      Number.isFinite(c.page) &&
+                      c.page > 0 &&
+                      c.chunkId &&
+                      c.quote
+                  )
+              : [],
+          }))
+          .filter((b: any) => b.text)
+          .slice(0, 12)
+      : [];
+
     const lesson: Lesson = {
       title: String(obj.title),
-      bullets: Array.isArray(obj.bullets)
-        ? obj.bullets.map((b: any) => String(b)).slice(0, 9)
-        : [],
+      bullets,
       diagram: {
         type: diagramType,
         nodes: Array.isArray(obj.diagram?.nodes)
@@ -83,23 +109,12 @@ function safeParseLesson(text: string): Lesson | null {
               .slice(0, 10)
           : [],
       },
-      citations: Array.isArray(obj.citations)
-        ? obj.citations
-            .map((c: any) => ({
-              page: Number(c?.page),
-              chunkId: String(c?.chunkId ?? ""),
-              quote: String(c?.quote ?? ""),
-            }))
-            .filter(
-              (c: any) =>
-                Number.isFinite(c.page) &&
-                c.page > 0 &&
-                c.chunkId &&
-                c.quote
-            )
-        : [],
       notes: obj.notes ? String(obj.notes) : "",
     };
+
+    // Must have bullets with citations to be considered valid
+    if (lesson.bullets.length === 0) return null;
+    if (lesson.bullets.every((b) => (b.cites?.length ?? 0) === 0)) return null;
 
     return lesson;
   } catch {
@@ -143,12 +158,14 @@ export default function WhiteboardLesson() {
     "simple"
   );
 
-  // Default to a smaller model for 8GB machines; can override via Netlify env var.
+  // ✅ NEW: inline citations per bullet (toggle open)
+  const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
+
+  // Default model; can override via Netlify env var.
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
-  // voice controls
   const [lastSpoken, setLastSpoken] = useState<string>("");
 
   const statusBadge = useMemo(() => {
@@ -169,6 +186,7 @@ export default function WhiteboardLesson() {
       }
       setIndexState({ status: "indexing", filename: file.name });
       setLessonState({ status: "idle" });
+      setOpenBulletIndex(null);
 
       const pdf = await extractPdfText(file);
 
@@ -208,24 +226,51 @@ export default function WhiteboardLesson() {
       return;
     }
 
-    // ✅ Multi-page evidence retrieval
+    // ✅ Build chunks for all pages
     const allChunks = chunkPdfPages(indexState.pdf.pages, {
       maxChars: 900,
       overlapChars: 120,
     });
 
     const seedQuery =
-      "summary key concepts definitions main ideas statistics findings implications conclusion";
+      "summary key concepts definitions statistics findings implications conclusion";
 
-    const top = retrieveTopChunksDiverse({
+    // ✅ GUARANTEE multi-page evidence (best 1 chunk per page)
+    const chunksByPage = new Map<number, typeof allChunks>();
+    for (const c of allChunks) {
+      if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
+      chunksByPage.get(c.page)!.push(c);
+    }
+
+    const guaranteed: typeof allChunks = [];
+    const pages = Array.from(chunksByPage.keys()).sort((a, b) => a - b);
+
+    for (const p of pages) {
+      const best = retrieveTopChunks(seedQuery, chunksByPage.get(p)!, 1);
+      if (best[0]) guaranteed.push(best[0]);
+    }
+
+    // ✅ Add extra chunks (diverse) for richness (still capped)
+    const extra = retrieveTopChunksDiverse({
       query: seedQuery,
       chunks: allChunks,
-      k: 7,
+      k: 6,
       maxPerPage: 2,
-      minDistinctPages: Math.min(2, indexState.pdf.numPages),
+      minDistinctPages: Math.min(2, indexState.numPages),
     });
 
-    const evidence = top.map((c) => ({
+    // Merge unique
+    const merged = [...guaranteed];
+    const seen = new Set(merged.map((c) => c.id));
+    for (const c of extra) {
+      if (!seen.has(c.id)) {
+        merged.push(c);
+        seen.add(c.id);
+      }
+      if (merged.length >= 10) break;
+    }
+
+    const evidence = merged.map((c) => ({
       chunkId: c.id,
       page: c.page,
       text: c.text,
@@ -248,7 +293,7 @@ export default function WhiteboardLesson() {
 
       let parsed = safeParseLesson(raw);
 
-      // ✅ JSON repair fallback (fixes Normal mode most of the time)
+      // ✅ Stronger JSON repair fallback (fixes Normal mode)
       if (!parsed) {
         const repairPrompt = buildJsonRepairPrompt(raw);
         const repaired = await generateText(modelId, repairPrompt);
@@ -266,9 +311,12 @@ export default function WhiteboardLesson() {
       }
 
       setLessonState({ status: "ready", lesson: parsed, raw });
+      setOpenBulletIndex(null);
 
-      // Auto-speak after lesson generates
-      const speech = `${parsed.title}. ${parsed.bullets.join(" ")}`;
+      // Auto-speak
+      const speech = `${parsed.title}. ${parsed.bullets
+        .map((b) => b.text)
+        .join(" ")}`;
       setLastSpoken(speech);
       speakText(speech);
     } catch (e: any) {
@@ -278,13 +326,6 @@ export default function WhiteboardLesson() {
       });
     }
   }
-
-  const citedPages = useMemo(() => {
-    if (lessonState.status !== "ready") return [];
-    return Array.from(new Set(lessonState.lesson.citations.map((c) => c.page)))
-      .filter((p) => Number.isFinite(p))
-      .sort((a, b) => a - b);
-  }, [lessonState]);
 
   return (
     <>
@@ -457,26 +498,60 @@ export default function WhiteboardLesson() {
               <>
                 <div className="lesson-chunk">
                   <strong>{lessonState.lesson.title}</strong>
-                  {citedPages.length > 0 && (
-                    <span
-                      className="source-pill"
-                      title="Evidence used"
-                      style={{ marginLeft: 10 }}
-                    >
-                      📄 {citedPages.map((p) => `p.${p}`).join(", ")}
-                    </span>
-                  )}
                 </div>
 
-                {lessonState.lesson.bullets.map((b, i) => (
-                  <div
-                    key={i}
-                    className="lesson-chunk"
-                    style={{ marginBottom: 14 }}
-                  >
-                    • {b}
-                  </div>
-                ))}
+                {lessonState.lesson.bullets.map((b, i) => {
+                  const open = openBulletIndex === i;
+                  return (
+                    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ marginTop: 2 }}>•</div>
+                        <div style={{ flex: 1 }}>{b.text}</div>
+
+                        {/* ✅ Icon next to each bullet */}
+                        <button
+                          className="source-pill"
+                          title="Show PDF source"
+                          style={{
+                            border: "none",
+                            cursor: "pointer",
+                            padding: "4px 8px",
+                          }}
+                          onClick={() =>
+                            setOpenBulletIndex(open ? null : i)
+                          }
+                        >
+                          📄
+                        </button>
+                      </div>
+
+                      {/* ✅ Inline citations under that bullet */}
+                      {open && b.cites?.length > 0 && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            marginLeft: 18,
+                            padding: 10,
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 10,
+                            background: "#fff",
+                            fontSize: 12,
+                            color: "#334155",
+                          }}
+                        >
+                          {b.cites.map((c, idx) => (
+                            <div key={idx} style={{ marginBottom: 8 }}>
+                              <div>
+                                <b>p.{c.page}</b> — <code>{c.chunkId}</code>
+                              </div>
+                              <div style={{ opacity: 0.9 }}>"{c.quote}"</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
 
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
@@ -491,39 +566,15 @@ export default function WhiteboardLesson() {
           </div>
         </main>
 
-        {/* RIGHT DRAWER */}
+        {/* RIGHT DRAWER (kept, but not used for sources now) */}
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
-            {lessonState.status === "ready" &&
-              lessonState.lesson.citations.length > 0 && (
-                <div className="quote-box">
-                  {lessonState.lesson.citations.map((c, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        marginBottom: 10,
-                        paddingBottom: 10,
-                        borderBottom: "1px solid #eee",
-                      }}
-                    >
-                      <div>
-                        <b>p.{c.page}</b> — <code>{c.chunkId}</code>
-                      </div>
-                      <div style={{ opacity: 0.9 }}>"{c.quote}"</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-            {lessonState.status !== "ready" && (
-              <div className="quote-box">
-                <em style={{ color: "#64748B" }}>
-                  Upload a PDF and click Start Lesson to generate evidence-backed
-                  citations.
-                </em>
-              </div>
-            )}
+            <div className="quote-box">
+              <em style={{ color: "#64748B" }}>
+                Click the 📄 icon next to any bullet to see its PDF source.
+              </em>
+            </div>
 
             {lessonState.status === "error" && lessonState.raw && (
               <details>
@@ -546,7 +597,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
   const width = 800;
   const height = 340;
 
-  // FLOWCHART: vertical stack
   if (diagram?.type === "flowchart") {
     const nodes = (diagram.nodes ?? []).slice(0, 8);
     const boxW = 180;
@@ -583,16 +633,8 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
                   fill="#FFFFFF"
                   stroke="#CBD5E0"
                 />
-                <text
-                  x={x}
-                  y={y + 24}
-                  fontSize={13}
-                  fill="#0F172A"
-                  textAnchor="middle"
-                >
-                  {String(n.label || "").length > 22
-                    ? String(n.label || "").slice(0, 22) + "…"
-                    : String(n.label || "")}
+                <text x={x} y={y + 24} fontSize={13} fill="#0F172A" textAnchor="middle">
+                  {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
             );
@@ -602,7 +644,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     );
   }
 
-  // TIMELINE: horizontal row
   if (diagram?.type === "timeline") {
     const nodes = (diagram.nodes ?? []).slice(0, 8);
     const boxW = 140;
@@ -638,16 +679,8 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
                   fill="#FFFFFF"
                   stroke="#CBD5E0"
                 />
-                <text
-                  x={x + boxW / 2}
-                  y={y + 5}
-                  fontSize={13}
-                  fill="#0F172A"
-                  textAnchor="middle"
-                >
-                  {String(n.label || "").length > 22
-                    ? String(n.label || "").slice(0, 22) + "…"
-                    : String(n.label || "")}
+                <text x={x + boxW / 2} y={y + 5} fontSize={13} fill="#0F172A" textAnchor="middle">
+                  {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
             );
@@ -657,7 +690,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     );
   }
 
-  // DEFAULT: concept_map (your existing star layout)
+  // Default: concept_map star layout
   const nodes: PositionedNode[] = useMemo(() => {
     const cleaned = normalizeLabels((diagram.nodes ?? [])).slice(0, 7);
     return layoutStar(cleaned, width, height);
@@ -690,13 +723,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
               fill="#FFFFFF"
               stroke="#CBD5E0"
             />
-            <text
-              x={n.x}
-              y={n.y + 4}
-              fontSize={13}
-              fill="#0F172A"
-              textAnchor="middle"
-            >
+            <text x={n.x} y={n.y + 4} fontSize={13} fill="#0F172A" textAnchor="middle">
               {n.label.length > 22 ? n.label.slice(0, 22) + "…" : n.label}
             </text>
           </g>
