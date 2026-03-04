@@ -157,6 +157,13 @@ function pickHighlightPhrase(chunkText: string) {
   return words.slice(0, 14).join(" "); // first ~14 words usually match
 }
 
+// ✅ NEW: snippet for showing a real PDF-backed quote
+function snippetFromChunkText(chunkText: string) {
+  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return clean.slice(0, 220);
+}
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -346,6 +353,22 @@ export default function WhiteboardLesson() {
         }
       }
 
+
+
+            // ✅ Force citations to match each bullet text (code-grounded)
+      const fixedBullets = parsed.bullets.map((b) => {
+        const best = retrieveTopChunks(b.text, allChunks, 2);
+        const cites = best.map((c) => ({
+          page: c.page,
+          chunkId: c.id,
+          quote: snippetFromChunkText(c.text),
+        }));
+        return { ...b, cites };
+      });
+
+      parsed = { ...parsed, bullets: fixedBullets };
+
+      
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
       setPreview(null);
@@ -835,3 +858,4 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
