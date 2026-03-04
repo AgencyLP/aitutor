@@ -354,7 +354,40 @@ export default function WhiteboardLesson() {
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
+      if (useWeb) {
+  setWebStatus("Searching web…");
+  setWebResults([]);
 
+  const titleQ = (parsed.title || "").trim();
+  const q1 = titleQ || "Artificial intelligence in education";
+  const q2 = "Educational technology";
+  const q3 = "Intelligent tutoring system";
+  const q4 = "EdTech market";
+
+  const pools = await Promise.all([
+    webSearchPool(q1),
+    webSearchPool(q2),
+    webSearchPool(q3),
+    webSearchPool(q4),
+  ]);
+
+  const merged: WebResult[] = [];
+  const seenUrls = new Set<string>();
+  for (const arr of pools) {
+    for (const r of arr) {
+      if (!r?.url) continue;
+      if (seenUrls.has(r.url)) continue;
+      seenUrls.add(r.url);
+      merged.push(r);
+    }
+  }
+
+  setWebResults(merged.slice(0, 12));
+  setWebStatus(`Web results: ${merged.length}`);
+} else {
+  setWebResults([]);
+  setWebStatus("");
+}
 
       if (useWeb) {
   const queryBase = parsed.title || indexState.filename || "education";
@@ -549,6 +582,7 @@ export default function WhiteboardLesson() {
           </div>
         </aside>
 
+        <main className="whiteboard-stage">
         <div
           className="whiteboard-surface"
           style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}
@@ -658,18 +692,6 @@ export default function WhiteboardLesson() {
         </div>
       )}
 
-      {useWeb && openWeb && b.webCites && b.webCites.length > 0 && (
-        <div
-          style={{
-            marginTop: 8,
-            marginLeft: 18,
-            padding: 10,
-            border: "1px solid #e5e7eb",
-            borderRadius: 10,
-            background: "#fff",
-            fontSize: 12,
-            color: "#334155",
-          }}
         >
           {b.webCites.map((w, idx) => (
             <div
@@ -900,6 +922,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
