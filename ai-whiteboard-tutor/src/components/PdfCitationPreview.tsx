@@ -16,6 +16,25 @@ function normalize(s: string) {
   return (s || "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Some builds of pdfjs-dist REQUIRE workerSrc to be set, even if you pass disableWorker:true.
+ * We set it to a classic worker hosted on cdnjs (not a module import).
+ */
+function ensureWorkerSrc() {
+  try {
+    const gwo = (pdfjsLib as any).GlobalWorkerOptions;
+    if (!gwo) return;
+    if (typeof gwo.workerSrc === "string" && gwo.workerSrc.length > 0) return;
+
+    // Classic worker URL (non-module) — usually works where unpkg/jsdelivr module workers fail
+    gwo.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.js";
+  } catch {
+    // ignore
+  }
+}
+
 export default function PdfCitationPreview({
   open,
   onClose,
@@ -47,21 +66,15 @@ export default function PdfCitationPreview({
       if (!canvasRef.current) return;
 
       try {
-        // ✅ Avoid worker issues: don't set any globals, just disable worker per-document
-        // Also, some builds require workerSrc to be a string; keep it empty safely.
-        try {
-          if ((pdfjsLib as any).GlobalWorkerOptions) {
-            (pdfjsLib as any).GlobalWorkerOptions.workerSrc = "";
-          }
-        } catch {
-          // ignore if read-only
-        }
+        ensureWorkerSrc();
 
         setStatus("Loading PDF…");
         const loadingTask = (pdfjsLib as any).getDocument({
           data: pdfData,
+          // We still keep this, but workerSrc is ALSO required in your environment.
           disableWorker: true,
         });
+
         const pdf = await loadingTask.promise;
         if (cancelled) return;
 
@@ -85,7 +98,6 @@ export default function PdfCitationPreview({
         await page.render({ canvasContext: ctx, viewport }).promise;
         if (cancelled) return;
 
-        // If no phrase, done
         if (!wanted || wanted.length < 6) {
           setStatus("");
           return;
@@ -145,11 +157,6 @@ export default function PdfCitationPreview({
         }
 
         const util = (pdfjsLib as any).Util;
-        if (!util?.transform) {
-          setStatus("Highlight unavailable (pdfjs Util missing).");
-          return;
-        }
-
         const newBoxes: HighlightBox[] = [];
 
         for (let i = bestRange.start; i <= bestRange.end; i++) {
