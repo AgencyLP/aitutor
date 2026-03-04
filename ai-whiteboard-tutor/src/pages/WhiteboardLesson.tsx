@@ -355,16 +355,36 @@ export default function WhiteboardLesson() {
 
 
 
-            // ✅ Force citations to match each bullet text (code-grounded)
-      const fixedBullets = parsed.bullets.map((b) => {
-        const best = retrieveTopChunks(b.text, allChunks, 2);
-        const cites = best.map((c) => ({
-          page: c.page,
-          chunkId: c.id,
-          quote: snippetFromChunkText(c.text),
-        }));
-        return { ...b, cites };
-      });
+      // ✅ Force citations to match each bullet text (code-grounded) + reduce repetition
+const usedChunkIds = new Set<string>();
+
+const fixedBullets = parsed.bullets.map((b) => {
+  // get more candidates, then pick ones not used yet
+  const candidates = retrieveTopChunks(b.text, allChunks, 8);
+
+  const picked: typeof candidates = [];
+  for (const c of candidates) {
+    if (!usedChunkIds.has(c.id)) {
+      picked.push(c);
+      usedChunkIds.add(c.id);
+    }
+    if (picked.length >= 2) break;
+  }
+
+  // fallback: if everything is already used, allow reuse
+  if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
+  if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
+
+  const cites = picked.map((c) => ({
+    page: c.page,
+    chunkId: c.id,
+    quote: snippetFromChunkText(c.text),
+  }));
+
+  return { ...b, cites };
+});
+
+parsed = { ...parsed, bullets: fixedBullets };
 
       parsed = { ...parsed, bullets: fixedBullets };
 
@@ -858,4 +878,5 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
