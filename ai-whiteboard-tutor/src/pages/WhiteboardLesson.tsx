@@ -50,10 +50,10 @@ type LessonState =
 
 type WebTakeaway = {
   bulletIndex: number;
-  text: string;
+  text: string; // 1 short sentence
   url: string;
   title: string;
-  source: string; // "wikipedia" | "duckduckgo" etc, keep as string for TS
+  source: string;
 };
 
 function extractBetween(text: string, startTag: string, endTag: string) {
@@ -64,9 +64,7 @@ function extractBetween(text: string, startTag: string, endTag: string) {
 }
 
 function safeParseLesson(text: string): Lesson | null {
-  // Prefer marker extraction if present
   const marked = extractBetween(text, "JSON_START", "JSON_END");
-
   const candidate =
     marked ??
     extractFirstJsonObject(text) ??
@@ -136,10 +134,8 @@ function safeParseLesson(text: string): Lesson | null {
       notes: obj.notes ? String(obj.notes).trim() : "",
     };
 
-    // guard against the model outputting schema placeholders
     if (!lesson.title || lesson.title.toLowerCase() === "string") return null;
     if (lesson.bullets.length === 0) return null;
-    if (lesson.bullets.some((b) => b.text.toLowerCase() === "string")) return null;
     if (lesson.bullets.every((b) => (b.cites?.length ?? 0) === 0)) return null;
 
     return lesson;
@@ -148,7 +144,6 @@ function safeParseLesson(text: string): Lesson | null {
   }
 }
 
-// ---- VOICE ----
 function speakText(text: string) {
   if (!("speechSynthesis" in window)) return;
   window.speechSynthesis.cancel();
@@ -201,7 +196,6 @@ function snippetFromChunkText(chunkText: string) {
   return clean.slice(0, 220);
 }
 
-// --- WEB TAKEAWAYS PROMPT (separate from lesson repair) ---
 function buildWebTakeawaysPrompt(params: {
   lessonTitle: string;
   bullets: string[];
@@ -220,18 +214,17 @@ URL: ${p.url}
     .join("\n\n---\n\n");
 
   return `
-You are writing "Web Takeaways" for an EdTech AI tutor UI.
+You are writing 1 SHORT web sentence per bullet for an EdTech tutor UI.
 
-RULES (very important):
-- Use ONLY the provided snippets. Do NOT invent facts.
-- Write 1 short sentence that SUPPORTS or ADDS CONTEXT for the bullet topic.
+Rules:
+- Use ONLY the snippet text. Do NOT invent facts.
 - Output MUST be valid JSON ONLY.
-- Do NOT output placeholder words like "string".
-- Keep it concise.
+- No headings, no markdown.
+- Text must be 1 sentence (max ~22 words), plain tutor style.
 
-Return JSON array with EXACT schema:
+Return JSON array:
 [
-  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "wikipedia|duckduckgo|web" }
+  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "web" }
 ]
 
 LESSON_TITLE: ${params.lessonTitle}
@@ -246,11 +239,8 @@ ${picksBlock}
 
 function buildWebTakeawaysRepairPrompt(badText: string) {
   return `
-Rewrite the following into VALID JSON ONLY.
-It must be a JSON array of objects exactly like:
-[
-  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "web" }
-]
+Rewrite into VALID JSON ONLY. Must be an array of:
+{ "bulletIndex": 0, "text": "...", "url":"https://...", "title":"...", "source":"web" }
 
 TEXT:
 ${badText}
@@ -296,13 +286,9 @@ export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
-  const [lessonState, setLessonState] = useState<LessonState>({
-    status: "idle",
-  });
+  const [lessonState, setLessonState] = useState<LessonState>({ status: "idle" });
 
-  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">(
-    "simple"
-  );
+  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
 
   const [useWeb, setUseWeb] = useState<boolean>(false);
@@ -310,15 +296,9 @@ export default function WhiteboardLesson() {
   const [webTakeaways, setWebTakeaways] = useState<WebTakeaway[]>([]);
 
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
-  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(
-    new Map()
-  );
+  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(new Map());
 
-  const [preview, setPreview] = useState<null | {
-    page: number;
-    chunkId: string;
-    phrase: string;
-  }>(null);
+  const [preview, setPreview] = useState<null | { page: number; chunkId: string; phrase: string }>(null);
 
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
@@ -329,8 +309,7 @@ export default function WhiteboardLesson() {
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
     if (indexState.status === "indexing") return "Indexing…";
-    if (indexState.status === "indexed")
-      return `Indexed ✅ (${indexState.numPages} pages)`;
+    if (indexState.status === "indexed") return `Indexed ✅ (${indexState.numPages} pages)`;
     return "Error";
   }, [indexState]);
 
@@ -352,7 +331,6 @@ export default function WhiteboardLesson() {
       setWebTakeaways([]);
 
       const bytes = await file.arrayBuffer();
-      // IMPORTANT: slice to avoid detached ArrayBuffer issues in some browsers
       setPdfData(bytes.slice(0));
 
       const pdf = await extractPdfText(file);
@@ -364,10 +342,7 @@ export default function WhiteboardLesson() {
         pdf,
       });
     } catch (e: any) {
-      setIndexState({
-        status: "error",
-        message: e?.message ?? "Failed to read PDF.",
-      });
+      setIndexState({ status: "error", message: e?.message ?? "Failed to read PDF." });
     }
   };
 
@@ -377,8 +352,7 @@ export default function WhiteboardLesson() {
     if (file) await handleFile(file);
   };
 
-  const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) =>
-    e.preventDefault();
+  const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) => e.preventDefault();
 
   async function startLesson() {
     if (indexState.status !== "indexed") return;
@@ -386,8 +360,7 @@ export default function WhiteboardLesson() {
     if (!hasWebGPU()) {
       setLessonState({
         status: "error",
-        message:
-          "WebGPU not detected. This free demo uses in-browser AI (WebGPU). Try Chrome desktop on a supported laptop.",
+        message: "WebGPU not detected. This demo uses in-browser AI (WebGPU). Try Chrome desktop.",
       });
       return;
     }
@@ -395,20 +368,14 @@ export default function WhiteboardLesson() {
     setWebStatus("");
     setWebTakeaways([]);
 
-    const allChunks = chunkPdfPages(indexState.pdf.pages, {
-      maxChars: 900,
-      overlapChars: 120,
-    });
+    const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
 
-    // build chunk map for preview text
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
 
-    const seedQuery =
-      "summary key concepts definitions statistics findings implications conclusion";
+    const seedQuery = "summary key concepts definitions statistics findings implications conclusion";
 
-    // guarantee at least 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -440,30 +407,17 @@ export default function WhiteboardLesson() {
       if (mergedEvidence.length >= 10) break;
     }
 
-    const evidence = mergedEvidence.map((c) => ({
-      chunkId: c.id,
-      page: c.page,
-      text: c.text,
-    }));
+    const evidence = mergedEvidence.map((c) => ({ chunkId: c.id, page: c.page, text: c.text }));
 
-    const basePrompt = buildLessonPrompt({
-      explainLevel,
-      evidence,
-      numPages: indexState.numPages,
-    });
+    const basePrompt = buildLessonPrompt({ explainLevel, evidence, numPages: indexState.numPages });
 
-    // IMPORTANT: do NOT wrap the whole schema inside JSON_START/END.
-    // Instead, tell the model to put its OUTPUT between markers.
     const prompt = `
 ${basePrompt}
 
-VERY IMPORTANT OUTPUT RULES:
-- Output MUST be JSON only between markers exactly like:
+OUTPUT RULES:
 JSON_START
 { ...valid JSON... }
 JSON_END
-- Do NOT output placeholders like "string".
-- Do NOT output markdown.
 `.trim();
 
     try {
@@ -477,37 +431,25 @@ JSON_END
 
       let parsed = safeParseLesson(raw);
 
-      // repair attempt #1
       if (!parsed) {
-        const repaired1 = await generateText(modelId, buildJsonRepairPrompt(raw));
-        parsed = safeParseLesson(repaired1);
+        const r1 = await generateText(modelId, buildJsonRepairPrompt(raw));
+        parsed = safeParseLesson(r1);
 
-        // repair attempt #2
         if (!parsed) {
-          const repaired2 = await generateText(
-            modelId,
-            buildJsonRepairPrompt(repaired1)
-          );
-          parsed = safeParseLesson(repaired2);
+          const r2 = await generateText(modelId, buildJsonRepairPrompt(r1));
+          parsed = safeParseLesson(r2);
 
           if (!parsed) {
             setLessonState({
               status: "error",
-              message:
-                "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
-              raw:
-                raw +
-                "\n\n----- REPAIR #1 -----\n\n" +
-                repaired1 +
-                "\n\n----- REPAIR #2 -----\n\n" +
-                repaired2,
+              message: "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
+              raw: raw + "\n\n----- REPAIR #1 -----\n\n" + r1 + "\n\n----- REPAIR #2 -----\n\n" + r2,
             });
             return;
           }
         }
       }
 
-      // Re-rank citations per bullet & reduce repetition
       const usedChunkIds = new Set<string>();
       const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
@@ -535,7 +477,6 @@ JSON_END
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      // WEB TAKEAWAYS
       if (useWeb) {
         try {
           setWebStatus("Searching web…");
@@ -546,7 +487,6 @@ JSON_END
             `${lessonTitle} statistics`,
             "Artificial intelligence in education",
             "Intelligent tutoring system",
-            "Educational technology",
           ];
 
           const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
@@ -562,7 +502,6 @@ JSON_END
             }
           }
 
-          // pick best match per bullet
           const picks = parsed.bullets
             .map((b, i) => {
               const ranked = [...mergedWeb]
@@ -589,7 +528,7 @@ JSON_END
             url: string;
           }>;
 
-          setWebStatus(`Web results: ${mergedWeb.length} — writing takeaways…`);
+          setWebStatus(`Web results: ${mergedWeb.length} — writing 1-line takeaways…`);
 
           const webPrompt = buildWebTakeawaysPrompt({
             lessonTitle,
@@ -597,32 +536,23 @@ JSON_END
             picks,
           });
 
-          const webPromptWithMarkers = `
-${webPrompt}
+          const webRaw = await generateText(
+            modelId,
+            `JSON_START\n${webPrompt}\nJSON_END`
+          );
 
-Output MUST be between markers:
-JSON_START
-[ ... ]
-JSON_END
-`.trim();
-
-          const webRaw = await generateText(modelId, webPromptWithMarkers);
           let takeaways = safeParseWebTakeaways(webRaw);
 
           if (!takeaways) {
-            const repaired = await generateText(
-              modelId,
-              buildWebTakeawaysRepairPrompt(webRaw)
-            );
+            const repaired = await generateText(modelId, buildWebTakeawaysRepairPrompt(webRaw));
             takeaways = safeParseWebTakeaways(repaired);
           }
 
           if (!takeaways) {
-            // fallback: show simplified snippets so user sees something
-            setWebStatus("Web takeaways failed (JSON). Showing snippet fallback.");
+            setWebStatus("Web takeaways failed (JSON). Using snippet fallback.");
             const fallback: WebTakeaway[] = picks.slice(0, 12).map((p) => ({
               bulletIndex: p.bulletIndex,
-              text: p.snippet ? p.snippet.slice(0, 180) : "No snippet available.",
+              text: p.snippet ? p.snippet.slice(0, 160) : "No snippet available.",
               url: p.url,
               title: p.title || "Web result",
               source: p.source || "web",
@@ -649,10 +579,7 @@ JSON_END
       setLastSpoken(speech);
       speakText(speech);
     } catch (e: any) {
-      setLessonState({
-        status: "error",
-        message: e?.message ?? "Failed to generate lesson.",
-      });
+      setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
     }
   }
 
@@ -673,10 +600,7 @@ JSON_END
               style={{
                 padding: "6px 10px",
                 fontSize: "0.8rem",
-                background:
-                  explainLevel === "simple"
-                    ? "var(--primary-grad)"
-                    : "#E8F0FE",
+                background: explainLevel === "simple" ? "var(--primary-grad)" : "#E8F0FE",
                 color: explainLevel === "simple" ? "white" : "#2C3E50",
               }}
               onClick={() => setExplainLevel("simple")}
@@ -688,10 +612,7 @@ JSON_END
               style={{
                 padding: "6px 10px",
                 fontSize: "0.8rem",
-                background:
-                  explainLevel === "normal"
-                    ? "var(--primary-grad)"
-                    : "#E8F0FE",
+                background: explainLevel === "normal" ? "var(--primary-grad)" : "#E8F0FE",
                 color: explainLevel === "normal" ? "white" : "#2C3E50",
               }}
               onClick={() => setExplainLevel("normal")}
@@ -720,8 +641,7 @@ JSON_END
             disabled={indexState.status !== "indexed"}
             style={{
               opacity: indexState.status === "indexed" ? 1 : 0.5,
-              cursor:
-                indexState.status === "indexed" ? "pointer" : "not-allowed",
+              cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
             }}
           >
             Start Lesson
@@ -771,9 +691,7 @@ JSON_END
             title="Click to upload or drag a PDF here"
           >
             <p style={{ margin: 0 }}>
-              {indexState.status === "indexed"
-                ? `PDF: ${indexState.filename}`
-                : "Click or drag PDF here"}
+              {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
             </p>
 
             <div className="status-badge">{statusBadge}</div>
@@ -804,16 +722,10 @@ JSON_END
                 • Model: <span style={{ opacity: 0.8 }}>{modelId}</span>
               </li>
               {lessonState.status === "idle" && <li>• Ready to start lesson</li>}
-              {lessonState.status === "loadingModel" && (
-                <li>• Loading: {lessonState.message}</li>
-              )}
-              {lessonState.status === "generating" && (
-                <li>• {lessonState.message}</li>
-              )}
+              {lessonState.status === "loadingModel" && <li>• Loading: {lessonState.message}</li>}
+              {lessonState.status === "generating" && <li>• {lessonState.message}</li>}
               {lessonState.status === "ready" && <li>• Lesson generated ✅</li>}
-              {lessonState.status === "error" && (
-                <li style={{ color: "#B91C1C" }}>• {lessonState.message}</li>
-              )}
+              {lessonState.status === "error" && <li style={{ color: "#B91C1C" }}>• {lessonState.message}</li>}
               {useWeb && webStatus && <li>• 🌐 {webStatus}</li>}
             </ul>
           </div>
@@ -821,27 +733,18 @@ JSON_END
 
         {/* CENTER */}
         <main className="whiteboard-stage">
-          <div
-            className="whiteboard-surface"
-            style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}
-          >
+          <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}>
             {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
-                  <strong>
-                    {indexState.status === "indexed"
-                      ? "Ready. Click Start Lesson."
-                      : "Upload a PDF to start."}
-                  </strong>
+                  <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
                     This demo runs AI on your laptop (WebGPU) and teaches from the PDF.
                   </div>
                 </div>
 
                 <div className="diagram-box">
-                  {indexState.status === "indexed"
-                    ? "[ Waiting to generate lesson… ]"
-                    : "[ Whiteboard area — waiting for PDF ]"}
+                  {indexState.status === "indexed" ? "[ Waiting to generate lesson… ]" : "[ Whiteboard area — waiting for PDF ]"}
                 </div>
               </>
             ) : (
@@ -852,87 +755,15 @@ JSON_END
 
                 {lessonState.lesson.bullets.map((b, i) => {
                   const openPdf = openBulletIndex === i;
+                  const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : null;
 
                   return (
                     <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+                      {/* PDF line + PDF button */}
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ marginTop: 2 }}>•</div>
                         <div style={{ flex: 1 }}>{b.text}</div>
-                        {useWeb && (
-  (() => {
-    const w = webTakeaways.find((x) => x.bulletIndex === i);
-    return (
-      <div
-        style={{
-          marginTop: 8,
-          marginLeft: 18,
-          padding: 10,
-          borderRadius: 12,
-          border: "1px solid #BAE6FD",
-          background: "#F0F9FF",
-          display: "flex",
-          gap: 10,
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-        }}
-      >
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
-            🌐 Web context
-          </div>
 
-          <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
-            {w ? w.text : "No relevant web result found for this bullet."}
-          </div>
-
-          {w && (
-            <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
-              Source: {w.title}
-            </div>
-          )}
-        </div>
-
-        {w ? (
-          <a
-            href={w.url}
-            target="_blank"
-            rel="noreferrer"
-            title="Open web source"
-            style={{
-              flexShrink: 0,
-              textDecoration: "none",
-              border: "1px solid #BAE6FD",
-              borderRadius: 10,
-              padding: "6px 10px",
-              background: "#FFFFFF",
-              color: "#2563EB",
-              fontWeight: 800,
-            }}
-          >
-            🔗
-          </a>
-        ) : (
-          <div
-            style={{
-              flexShrink: 0,
-              border: "1px solid #BAE6FD",
-              borderRadius: 10,
-              padding: "6px 10px",
-              background: "#FFFFFF",
-              color: "#94A3B8",
-              fontWeight: 800,
-            }}
-            title="No link available"
-          >
-            🔗
-          </div>
-        )}
-      </div>
-    );
-  })()
-)}
-
-                      
                         <button
                           className="source-pill"
                           title="Show PDF source + open preview"
@@ -953,6 +784,77 @@ JSON_END
                         </button>
                       </div>
 
+                      {/* WEB line under PDF line (blue box) */}
+                      {useWeb && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            marginLeft: 18,
+                            padding: 10,
+                            borderRadius: 12,
+                            border: "1px solid #BAE6FD",
+                            background: "#F0F9FF",
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "flex-start",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
+                              🌐 Web context
+                            </div>
+
+                            <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
+                              {w ? w.text : "No relevant web result found for this bullet."}
+                            </div>
+
+                            {w && (
+                              <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
+                                Source: {w.title}
+                              </div>
+                            )}
+                          </div>
+
+                          {w ? (
+                            <a
+                              href={w.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title="Open web source"
+                              style={{
+                                flexShrink: 0,
+                                textDecoration: "none",
+                                border: "1px solid #BAE6FD",
+                                borderRadius: 10,
+                                padding: "6px 10px",
+                                background: "#FFFFFF",
+                                color: "#2563EB",
+                                fontWeight: 800,
+                              }}
+                            >
+                              🔗
+                            </a>
+                          ) : (
+                            <div
+                              style={{
+                                flexShrink: 0,
+                                border: "1px solid #BAE6FD",
+                                borderRadius: 10,
+                                padding: "6px 10px",
+                                background: "#FFFFFF",
+                                color: "#94A3B8",
+                                fontWeight: 800,
+                              }}
+                              title="No link available"
+                            >
+                              🔗
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* PDF citations */}
                       {openPdf && b.cites?.length > 0 && (
                         <div
                           style={{
@@ -988,9 +890,7 @@ JSON_END
                                 <div>
                                   <b>p.{page}</b> — <code>{c.chunkId}</code>
                                 </div>
-                                <div style={{ opacity: 0.9 }}>
-                                  "{phrase ? phrase + "…" : c.quote}"
-                                </div>
+                                <div style={{ opacity: 0.9 }}>"{phrase ? phrase + "…" : c.quote}"</div>
                               </div>
                             );
                           })}
@@ -1000,71 +900,10 @@ JSON_END
                   );
                 })}
 
-                    {webTakeaways.length === 0 ? (
-                      <div style={{ color: "#64748B", fontSize: 13 }}>
-                        Nothing to show (web search returned no relevant results).
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        {webTakeaways.map((w, idx) => (
-                          <div
-                            key={idx}
-                            style={{
-                              padding: 10,
-                              borderRadius: 12,
-                              border: "1px solid #e2e8f0",
-                              background: "#ffffff",
-                              display: "flex",
-                              gap: 10,
-                              alignItems: "flex-start",
-                              justifyContent: "space-between",
-                            }}
-                          >
-                            <div style={{ flex: 1 }}>
-                              <div style={{ fontSize: 12, color: "#334155", marginBottom: 6 }}>
-                                <b>Matches bullet #{w.bulletIndex + 1}</b>
-                                <span style={{ marginLeft: 8, opacity: 0.75 }}>
-                                  ({w.source})
-                                </span>
-                              </div>
-
-                              <div style={{ fontSize: 13, color: "#0f172a" }}>{w.text}</div>
-
-                              <div style={{ marginTop: 6, fontSize: 12, color: "#64748B" }}>
-                                Source: {w.title}
-                              </div>
-                            </div>
-
-                            <a
-                              href={w.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              title="Open web source"
-                              style={{
-                                flexShrink: 0,
-                                textDecoration: "none",
-                                border: "1px solid #e2e8f0",
-                                borderRadius: 10,
-                                padding: "6px 10px",
-                                color: "#2563eb",
-                                fontWeight: 800,
-                              }}
-                            >
-                              🔗
-                            </a>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
                 {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
-                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
-                    Note: {lessonState.lesson.notes}
-                  </div>
+                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>Note: {lessonState.lesson.notes}</div>
                 )}
               </>
             )}
@@ -1097,11 +936,7 @@ JSON_END
         pdfData={pdfData}
         pageNumber={preview?.page ?? 1}
         highlightPhrase={preview?.phrase ?? ""}
-        header={
-          preview
-            ? `PDF Preview — p.${preview.page} (${preview.chunkId})`
-            : undefined
-        }
+        header={preview ? `PDF Preview — p.${preview.page} (${preview.chunkId})` : undefined}
       />
     </>
   );
@@ -1128,32 +963,9 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
             const y = startY + i * (boxH + gap);
             return (
               <g key={n.id ?? i}>
-                {i > 0 && (
-                  <line
-                    x1={x}
-                    y1={y - gap}
-                    x2={x}
-                    y2={y}
-                    stroke="#94A3B8"
-                    strokeWidth={2}
-                  />
-                )}
-                <rect
-                  x={x - boxW / 2}
-                  y={y}
-                  width={boxW}
-                  height={boxH}
-                  rx={10}
-                  fill="#FFFFFF"
-                  stroke="#CBD5E0"
-                />
-                <text
-                  x={x}
-                  y={y + 24}
-                  fontSize={13}
-                  fill="#0F172A"
-                  textAnchor="middle"
-                >
+                {i > 0 && <line x1={x} y1={y - gap} x2={x} y2={y} stroke="#94A3B8" strokeWidth={2} />}
+                <rect x={x - boxW / 2} y={y} width={boxW} height={boxH} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+                <text x={x} y={y + 24} fontSize={13} fill="#0F172A" textAnchor="middle">
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -1180,32 +992,9 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
             const x = startX + i * (boxW + 20);
             return (
               <g key={n.id ?? i}>
-                {i > 0 && (
-                  <line
-                    x1={x - 20}
-                    y1={y}
-                    x2={x}
-                    y2={y}
-                    stroke="#94A3B8"
-                    strokeWidth={2}
-                  />
-                )}
-                <rect
-                  x={x}
-                  y={y - boxH / 2}
-                  width={boxW}
-                  height={boxH}
-                  rx={10}
-                  fill="#FFFFFF"
-                  stroke="#CBD5E0"
-                />
-                <text
-                  x={x + boxW / 2}
-                  y={y + 5}
-                  fontSize={13}
-                  fill="#0F172A"
-                  textAnchor="middle"
-                >
+                {i > 0 && <line x1={x - 20} y1={y} x2={x} y2={y} stroke="#94A3B8" strokeWidth={2} />}
+                <rect x={x} y={y - boxH / 2} width={boxW} height={boxH} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+                <text x={x + boxW / 2} y={y + 5} fontSize={13} fill="#0F172A" textAnchor="middle">
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -1226,35 +1015,13 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
       <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
         {nodes.length > 1 &&
           nodes.slice(1).map((n, idx) => (
-            <line
-              key={idx}
-              x1={nodes[0].x}
-              y1={nodes[0].y}
-              x2={n.x}
-              y2={n.y}
-              stroke="#94A3B8"
-              strokeWidth={2}
-            />
+            <line key={idx} x1={nodes[0].x} y1={nodes[0].y} x2={n.x} y2={n.y} stroke="#94A3B8" strokeWidth={2} />
           ))}
 
         {nodes.map((n) => (
           <g key={n.id}>
-            <rect
-              x={n.x - 75}
-              y={n.y - 19}
-              width={150}
-              height={38}
-              rx={10}
-              fill="#FFFFFF"
-              stroke="#CBD5E0"
-            />
-            <text
-              x={n.x}
-              y={n.y + 4}
-              fontSize={13}
-              fill="#0F172A"
-              textAnchor="middle"
-            >
+            <rect x={n.x - 75} y={n.y - 19} width={150} height={38} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+            <text x={n.x} y={n.y + 4} fontSize={13} fill="#0F172A" textAnchor="middle">
               {n.label.length > 22 ? n.label.slice(0, 22) + "…" : n.label}
             </text>
           </g>
@@ -1263,4 +1030,3 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
-
