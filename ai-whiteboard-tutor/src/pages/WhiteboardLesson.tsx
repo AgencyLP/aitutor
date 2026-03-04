@@ -14,6 +14,9 @@ import {
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
 
+// ✅ NEW: PDF preview modal
+import PdfCitationPreview from "../components/PdfCitationPreview";
+
 type IndexState =
   | { status: "idle" }
   | { status: "indexing"; filename: string }
@@ -146,6 +149,14 @@ function speakText(text: string) {
   window.speechSynthesis.speak(utter);
 }
 
+// ✅ NEW: choose a highlight phrase from real PDF chunk text
+function pickHighlightPhrase(chunkText: string) {
+  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const words = clean.split(" ");
+  return words.slice(0, 14).join(" "); // first ~14 words usually match
+}
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -158,8 +169,23 @@ export default function WhiteboardLesson() {
     "simple"
   );
 
-  // ✅ NEW: inline citations per bullet (toggle open)
+  // ✅ Inline citations per bullet (toggle open)
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
+
+  // ✅ NEW: store PDF bytes so we can render it later
+  const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
+
+  // ✅ NEW: map chunkId -> real chunk text (from extraction)
+  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(
+    new Map()
+  );
+
+  // ✅ NEW: preview modal state
+  const [preview, setPreview] = useState<null | {
+    page: number;
+    chunkId: string;
+    phrase: string;
+  }>(null);
 
   // Default model; can override via Netlify env var.
   const modelId =
@@ -187,6 +213,11 @@ export default function WhiteboardLesson() {
       setIndexState({ status: "indexing", filename: file.name });
       setLessonState({ status: "idle" });
       setOpenBulletIndex(null);
+      setPreview(null);
+
+      // ✅ Store bytes for later preview rendering
+      const bytes = await file.arrayBuffer();
+      setPdfData(bytes);
 
       const pdf = await extractPdfText(file);
 
@@ -231,6 +262,11 @@ export default function WhiteboardLesson() {
       maxChars: 900,
       overlapChars: 120,
     });
+
+    // ✅ Build real chunk map (for trustworthy previews/snippets)
+    const map = new Map<string, { page: number; text: string }>();
+    for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
+    chunkMapRef.current = map;
 
     const seedQuery =
       "summary key concepts definitions statistics findings implications conclusion";
@@ -293,7 +329,7 @@ export default function WhiteboardLesson() {
 
       let parsed = safeParseLesson(raw);
 
-      // ✅ Stronger JSON repair fallback (fixes Normal mode)
+      // ✅ JSON repair fallback (fixes Normal mode)
       if (!parsed) {
         const repairPrompt = buildJsonRepairPrompt(raw);
         const repaired = await generateText(modelId, repairPrompt);
@@ -312,6 +348,7 @@ export default function WhiteboardLesson() {
 
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
+      setPreview(null);
 
       // Auto-speak
       const speech = `${parsed.title}. ${parsed.bullets
@@ -503,12 +540,22 @@ export default function WhiteboardLesson() {
                 {lessonState.lesson.bullets.map((b, i) => {
                   const open = openBulletIndex === i;
                   return (
-                    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                    <div
+                      key={i}
+                      className="lesson-chunk"
+                      style={{ marginBottom: 12 }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 8,
+                        }}
+                      >
                         <div style={{ marginTop: 2 }}>•</div>
                         <div style={{ flex: 1 }}>{b.text}</div>
 
-                        {/* ✅ Icon next to each bullet */}
+                        {/* Icon next to each bullet */}
                         <button
                           className="source-pill"
                           title="Show PDF source"
@@ -517,15 +564,13 @@ export default function WhiteboardLesson() {
                             cursor: "pointer",
                             padding: "4px 8px",
                           }}
-                          onClick={() =>
-                            setOpenBulletIndex(open ? null : i)
-                          }
+                          onClick={() => setOpenBulletIndex(open ? null : i)}
                         >
                           📄
                         </button>
                       </div>
 
-                      {/* ✅ Inline citations under that bullet */}
+                      {/* Inline citations under that bullet */}
                       {open && b.cites?.length > 0 && (
                         <div
                           style={{
@@ -539,14 +584,37 @@ export default function WhiteboardLesson() {
                             color: "#334155",
                           }}
                         >
-                          {b.cites.map((c, idx) => (
-                            <div key={idx} style={{ marginBottom: 8 }}>
-                              <div>
-                                <b>p.{c.page}</b> — <code>{c.chunkId}</code>
+                          {b.cites.map((c, idx) => {
+                            const real = chunkMapRef.current.get(c.chunkId);
+                            const page = real?.page ?? c.page;
+                            const phrase = pickHighlightPhrase(real?.text ?? "");
+                            return (
+                              <div
+                                key={idx}
+                                style={{
+                                  marginBottom: 10,
+                                  paddingBottom: 10,
+                                  borderBottom: "1px solid #f1f5f9",
+                                  cursor: "pointer",
+                                }}
+                                title="Click to open PDF preview + highlight"
+                                onClick={() =>
+                                  setPreview({
+                                    page,
+                                    chunkId: c.chunkId,
+                                    phrase,
+                                  })
+                                }
+                              >
+                                <div>
+                                  <b>p.{page}</b> — <code>{c.chunkId}</code>
+                                </div>
+                                <div style={{ opacity: 0.9 }}>
+                                  "{phrase ? phrase + "…" : c.quote}"
+                                </div>
                               </div>
-                              <div style={{ opacity: 0.9 }}>"{c.quote}"</div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -557,7 +625,9 @@ export default function WhiteboardLesson() {
 
                 {lessonState.lesson.notes &&
                   lessonState.lesson.notes !== "string" && (
-                    <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
+                    <div
+                      style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}
+                    >
                       Note: {lessonState.lesson.notes}
                     </div>
                   )}
@@ -566,13 +636,14 @@ export default function WhiteboardLesson() {
           </div>
         </main>
 
-        {/* RIGHT DRAWER (kept, but not used for sources now) */}
+        {/* RIGHT DRAWER */}
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
             <div className="quote-box">
               <em style={{ color: "#64748B" }}>
-                Click the 📄 icon next to any bullet to see its PDF source.
+                Click 📄 next to a bullet, then click a citation to open PDF
+                preview with highlight.
               </em>
             </div>
 
@@ -589,6 +660,20 @@ export default function WhiteboardLesson() {
           </div>
         </aside>
       </div>
+
+      {/* ✅ PDF Preview Modal */}
+      <PdfCitationPreview
+        open={!!preview}
+        onClose={() => setPreview(null)}
+        pdfData={pdfData}
+        pageNumber={preview?.page ?? 1}
+        highlightPhrase={preview?.phrase ?? ""}
+        header={
+          preview
+            ? `PDF Preview — p.${preview.page} (${preview.chunkId})`
+            : undefined
+        }
+      />
     </>
   );
 }
@@ -633,7 +718,13 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
                   fill="#FFFFFF"
                   stroke="#CBD5E0"
                 />
-                <text x={x} y={y + 24} fontSize={13} fill="#0F172A" textAnchor="middle">
+                <text
+                  x={x}
+                  y={y + 24}
+                  fontSize={13}
+                  fill="#0F172A"
+                  textAnchor="middle"
+                >
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -679,7 +770,13 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
                   fill="#FFFFFF"
                   stroke="#CBD5E0"
                 />
-                <text x={x + boxW / 2} y={y + 5} fontSize={13} fill="#0F172A" textAnchor="middle">
+                <text
+                  x={x + boxW / 2}
+                  y={y + 5}
+                  fontSize={13}
+                  fill="#0F172A"
+                  textAnchor="middle"
+                >
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -723,7 +820,13 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
               fill="#FFFFFF"
               stroke="#CBD5E0"
             />
-            <text x={n.x} y={n.y + 4} fontSize={13} fill="#0F172A" textAnchor="middle">
+            <text
+              x={n.x}
+              y={n.y + 4}
+              fontSize={13}
+              fill="#0F172A"
+              textAnchor="middle"
+            >
               {n.label.length > 22 ? n.label.slice(0, 22) + "…" : n.label}
             </text>
           </g>
