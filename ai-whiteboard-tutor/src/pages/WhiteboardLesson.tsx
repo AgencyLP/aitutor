@@ -1,17 +1,18 @@
 import React, { useMemo, useRef, useState } from "react";
 import { extractPdfText, type ExtractedPdf } from "../rag/pdfExtract";
-import { buildLessonPrompt, extractFirstJsonObject } from "../llm/prompts";
+import {
+  buildLessonPrompt,
+  buildJsonRepairPrompt,
+  extractFirstJsonObject,
+} from "../llm/prompts";
 import { generateText, hasWebGPU } from "../llm/webllmClient";
+import { chunkPdfPages } from "../rag/chunking";
+import { retrieveTopChunksDiverse } from "../rag/retriever";
 import {
   layoutStar,
   normalizeLabels,
-  type ConceptMap,
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
-
-// ✅ NEW: chunk + retrieve evidence from PDF
-import { chunkPdfPages } from "../rag/chunking";
-import { retrieveTopChunks } from "../rag/retriever";
 
 type IndexState =
   | { status: "idle" }
@@ -19,14 +20,19 @@ type IndexState =
   | { status: "indexed"; filename: string; numPages: number; pdf: ExtractedPdf }
   | { status: "error"; message: string };
 
-// ✅ NEW: structured citations
 type Citation = { page: number; chunkId: string; quote: string };
+
+type Diagram = {
+  type: "concept_map" | "flowchart" | "timeline";
+  nodes: Array<{ id: string; label: string }>;
+  edges: Array<{ from: string; to: string; label?: string }>;
+};
 
 type Lesson = {
   title: string;
   bullets: string[];
-  diagram: ConceptMap;
-  citations: Citation[]; // ✅ was number[]
+  diagram: Diagram;
+  citations: Citation[];
   notes?: string;
 };
 
@@ -37,8 +43,6 @@ type LessonState =
   | { status: "ready"; lesson: Lesson; raw: string }
   | { status: "error"; message: string; raw?: string };
 
-// ❌ REMOVED: buildContextFromPdf (we now retrieve evidence chunks instead)
-
 function safeParseLesson(text: string): Lesson | null {
   const candidate = extractFirstJsonObject(text) ?? text;
   try {
@@ -47,13 +51,18 @@ function safeParseLesson(text: string): Lesson | null {
     if (!obj || typeof obj !== "object") return null;
     if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
+    const diagramType =
+      obj.diagram?.type === "flowchart" || obj.diagram?.type === "timeline"
+        ? obj.diagram.type
+        : "concept_map";
+
     const lesson: Lesson = {
       title: String(obj.title),
       bullets: Array.isArray(obj.bullets)
         ? obj.bullets.map((b: any) => String(b)).slice(0, 9)
         : [],
       diagram: {
-        type: "concept_map",
+        type: diagramType,
         nodes: Array.isArray(obj.diagram?.nodes)
           ? obj.diagram.nodes
               .map((n: any, i: number) => ({
@@ -61,7 +70,7 @@ function safeParseLesson(text: string): Lesson | null {
                 label: String(n.label ?? ""),
               }))
               .filter((n: any) => n.label)
-              .slice(0, 7)
+              .slice(0, 8)
           : [],
         edges: Array.isArray(obj.diagram?.edges)
           ? obj.diagram.edges
@@ -71,11 +80,9 @@ function safeParseLesson(text: string): Lesson | null {
                 label: e.label ? String(e.label) : "",
               }))
               .filter((e: any) => e.from && e.to)
-              .slice(0, 7)
+              .slice(0, 10)
           : [],
       },
-
-      // ✅ NEW: parse citation objects instead of page numbers
       citations: Array.isArray(obj.citations)
         ? obj.citations
             .map((c: any) => ({
@@ -85,10 +92,12 @@ function safeParseLesson(text: string): Lesson | null {
             }))
             .filter(
               (c: any) =>
-                Number.isFinite(c.page) && c.page > 0 && c.chunkId && c.quote
+                Number.isFinite(c.page) &&
+                c.page > 0 &&
+                c.chunkId &&
+                c.quote
             )
         : [],
-
       notes: obj.notes ? String(obj.notes) : "",
     };
 
@@ -134,10 +143,12 @@ export default function WhiteboardLesson() {
     "simple"
   );
 
+  // Default to a smaller model for 8GB machines; can override via Netlify env var.
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
+  // voice controls
   const [lastSpoken, setLastSpoken] = useState<string>("");
 
   const statusBadge = useMemo(() => {
@@ -197,25 +208,34 @@ export default function WhiteboardLesson() {
       return;
     }
 
-    // ✅ NEW: build evidence from PDF chunks + retrieval
+    // ✅ Multi-page evidence retrieval
     const allChunks = chunkPdfPages(indexState.pdf.pages, {
       maxChars: 900,
       overlapChars: 120,
     });
 
-    // This seed query is just for “start lesson”.
-    // Later, use the user’s question as the query.
     const seedQuery =
-      "summary main ideas key concepts definitions important points";
+      "summary key concepts definitions main ideas statistics findings implications conclusion";
 
-    const top = retrieveTopChunks(seedQuery, allChunks, 6);
+    const top = retrieveTopChunksDiverse({
+      query: seedQuery,
+      chunks: allChunks,
+      k: 7,
+      maxPerPage: 2,
+      minDistinctPages: Math.min(2, indexState.pdf.numPages),
+    });
+
     const evidence = top.map((c) => ({
       chunkId: c.id,
       page: c.page,
       text: c.text,
     }));
 
-    const prompt = buildLessonPrompt({ explainLevel, evidence });
+    const prompt = buildLessonPrompt({
+      explainLevel,
+      evidence,
+      numPages: indexState.numPages,
+    });
 
     try {
       setLessonState({ status: "loadingModel", message: "Loading model…" });
@@ -226,18 +246,28 @@ export default function WhiteboardLesson() {
 
       setLessonState({ status: "generating", message: "Generating lesson…" });
 
-      const parsed = safeParseLesson(raw);
+      let parsed = safeParseLesson(raw);
+
+      // ✅ JSON repair fallback (fixes Normal mode most of the time)
       if (!parsed) {
-        setLessonState({
-          status: "error",
-          message: "Model output wasn’t valid JSON. Try again (or smaller PDF).",
-          raw,
-        });
-        return;
+        const repairPrompt = buildJsonRepairPrompt(raw);
+        const repaired = await generateText(modelId, repairPrompt);
+        parsed = safeParseLesson(repaired);
+
+        if (!parsed) {
+          setLessonState({
+            status: "error",
+            message:
+              "Model output wasn’t valid JSON. Try again (or smaller PDF).",
+            raw,
+          });
+          return;
+        }
       }
 
       setLessonState({ status: "ready", lesson: parsed, raw });
 
+      // Auto-speak after lesson generates
       const speech = `${parsed.title}. ${parsed.bullets.join(" ")}`;
       setLastSpoken(speech);
       speakText(speech);
@@ -248,6 +278,13 @@ export default function WhiteboardLesson() {
       });
     }
   }
+
+  const citedPages = useMemo(() => {
+    if (lessonState.status !== "ready") return [];
+    return Array.from(new Set(lessonState.lesson.citations.map((c) => c.page)))
+      .filter((p) => Number.isFinite(p))
+      .sort((a, b) => a - b);
+  }, [lessonState]);
 
   return (
     <>
@@ -420,21 +457,13 @@ export default function WhiteboardLesson() {
               <>
                 <div className="lesson-chunk">
                   <strong>{lessonState.lesson.title}</strong>
-
-                  {/* ✅ UPDATED: show evidence pages from citation objects */}
-                  {lessonState.lesson.citations?.length > 0 && (
+                  {citedPages.length > 0 && (
                     <span
                       className="source-pill"
                       title="Evidence used"
                       style={{ marginLeft: 10 }}
                     >
-                      📄{" "}
-                      {Array.from(
-                        new Set(lessonState.lesson.citations.map((c) => c.page))
-                      )
-                        .sort((a, b) => a - b)
-                        .map((p) => `p.${p}`)
-                        .join(", ")}
+                      📄 {citedPages.map((p) => `p.${p}`).join(", ")}
                     </span>
                   )}
                 </div>
@@ -466,7 +495,6 @@ export default function WhiteboardLesson() {
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
-            {/* ✅ UPDATED: show real citations */}
             {lessonState.status === "ready" &&
               lessonState.lesson.citations.length > 0 && (
                 <div className="quote-box">
@@ -514,12 +542,124 @@ export default function WhiteboardLesson() {
   );
 }
 
-function DiagramPanel({ diagram }: { diagram: ConceptMap }) {
+function DiagramPanel({ diagram }: { diagram: Diagram }) {
   const width = 800;
   const height = 340;
 
+  // FLOWCHART: vertical stack
+  if (diagram?.type === "flowchart") {
+    const nodes = (diagram.nodes ?? []).slice(0, 8);
+    const boxW = 180;
+    const boxH = 38;
+    const gap = 18;
+
+    const totalH = nodes.length * boxH + Math.max(0, nodes.length - 1) * gap;
+    const startY = Math.max(20, (height - totalH) / 2);
+    const x = width / 2;
+
+    return (
+      <div className="diagram-box" style={{ height: 320, padding: 0 }}>
+        <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
+          {nodes.map((n, i) => {
+            const y = startY + i * (boxH + gap);
+            return (
+              <g key={n.id ?? i}>
+                {i > 0 && (
+                  <line
+                    x1={x}
+                    y1={y - gap}
+                    x2={x}
+                    y2={y}
+                    stroke="#94A3B8"
+                    strokeWidth={2}
+                  />
+                )}
+                <rect
+                  x={x - boxW / 2}
+                  y={y}
+                  width={boxW}
+                  height={boxH}
+                  rx={10}
+                  fill="#FFFFFF"
+                  stroke="#CBD5E0"
+                />
+                <text
+                  x={x}
+                  y={y + 24}
+                  fontSize={13}
+                  fill="#0F172A"
+                  textAnchor="middle"
+                >
+                  {String(n.label || "").length > 22
+                    ? String(n.label || "").slice(0, 22) + "…"
+                    : String(n.label || "")}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    );
+  }
+
+  // TIMELINE: horizontal row
+  if (diagram?.type === "timeline") {
+    const nodes = (diagram.nodes ?? []).slice(0, 8);
+    const boxW = 140;
+    const boxH = 38;
+
+    const totalW = nodes.length * boxW + Math.max(0, nodes.length - 1) * 20;
+    const startX = Math.max(20, (width - totalW) / 2);
+    const y = height / 2;
+
+    return (
+      <div className="diagram-box" style={{ height: 320, padding: 0 }}>
+        <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
+          {nodes.map((n, i) => {
+            const x = startX + i * (boxW + 20);
+            return (
+              <g key={n.id ?? i}>
+                {i > 0 && (
+                  <line
+                    x1={x - 20}
+                    y1={y}
+                    x2={x}
+                    y2={y}
+                    stroke="#94A3B8"
+                    strokeWidth={2}
+                  />
+                )}
+                <rect
+                  x={x}
+                  y={y - boxH / 2}
+                  width={boxW}
+                  height={boxH}
+                  rx={10}
+                  fill="#FFFFFF"
+                  stroke="#CBD5E0"
+                />
+                <text
+                  x={x + boxW / 2}
+                  y={y + 5}
+                  fontSize={13}
+                  fill="#0F172A"
+                  textAnchor="middle"
+                >
+                  {String(n.label || "").length > 22
+                    ? String(n.label || "").slice(0, 22) + "…"
+                    : String(n.label || "")}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    );
+  }
+
+  // DEFAULT: concept_map (your existing star layout)
   const nodes: PositionedNode[] = useMemo(() => {
-    const cleaned = normalizeLabels(diagram.nodes).slice(0, 7);
+    const cleaned = normalizeLabels((diagram.nodes ?? [])).slice(0, 7);
     return layoutStar(cleaned, width, height);
   }, [diagram.nodes]);
 
