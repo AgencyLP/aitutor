@@ -25,7 +25,12 @@ type IndexState =
 
 type Citation = { page: number; chunkId: string; quote: string };
 
-type Bullet = { text: string; cites: Citation[]; webCites?: WebResult[] };
+type Bullet = {
+  text: string;
+  cites: Citation[];
+  webCites?: WebResult[];
+  webLine?: string; // ✅ one web line per bullet
+};
 
 type Diagram = {
   type: "concept_map" | "flowchart" | "timeline";
@@ -348,17 +353,18 @@ export default function WhiteboardLesson() {
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      if (useWeb) {
-         const queryBase = parsed.title || indexState.filename || "education";
-         const pool = await webSearchPool(queryBase);
 
-         const score = (text: string, r: WebResult) => {
-           const a = tokenize(text);
-           const b = tokenize((r.title + " " + r.snippet).slice(0, 300));
-          const setB = new Set(b);
-          let hit = 0;
-          for (const t of a) if (setB.has(t)) hit++;
-          return hit;
+      if (useWeb) {
+  const queryBase = parsed.title || indexState.filename || "education";
+  const pool = await webSearchPool(queryBase);
+
+  const score = (text: string, r: WebResult) => {
+    const a = tokenize(text);
+    const b2 = tokenize((r.title + " " + r.snippet).slice(0, 300));
+    const setB = new Set(b2);
+    let hit = 0;
+    for (const t of a) if (setB.has(t)) hit++;
+    return hit;
   };
 
   const bulletsWithWeb = parsed.bullets.map((b) => {
@@ -367,11 +373,21 @@ export default function WhiteboardLesson() {
       .sort((x, y) => y.s - x.s)
       .map((x) => x.r);
 
-    return { ...b, webCites: ranked.slice(0, 2) };
+    const top = ranked[0]; // best matching web result for THIS bullet
+    const webLine = top
+      ? `🌐 ${top.title} — ${String(top.snippet || "").slice(0, 180)}`
+      : "🌐 No web result found.";
+
+    return {
+      ...b,
+      webCites: ranked.slice(0, 2),
+      webLine,
+    };
   });
 
   parsed = { ...parsed, bullets: bulletsWithWeb };
 }
+           
 
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
@@ -562,7 +578,17 @@ export default function WhiteboardLesson() {
     <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
         <div style={{ marginTop: 2 }}>•</div>
-        <div style={{ flex: 1 }}>{b.text}</div>
+        <div style={{ flex: 1 }}>
+        {/* PDF answer line */}
+        <div>{b.text}</div>
+
+        {/* WEB answer line (only if web mode is on) */}
+        {useWeb && b.webLine && (
+           <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
+             {b.webLine}
+           </div>
+    )}
+ </div>
 
         <button
           className="source-pill"
@@ -824,6 +850,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
