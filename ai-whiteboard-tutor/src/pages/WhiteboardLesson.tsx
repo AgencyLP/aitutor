@@ -858,7 +858,81 @@ JSON_END
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ marginTop: 2 }}>•</div>
                         <div style={{ flex: 1 }}>{b.text}</div>
+                        {useWeb && (
+  (() => {
+    const w = webTakeaways.find((x) => x.bulletIndex === i);
+    return (
+      <div
+        style={{
+          marginTop: 8,
+          marginLeft: 18,
+          padding: 10,
+          borderRadius: 12,
+          border: "1px solid #BAE6FD",
+          background: "#F0F9FF",
+          display: "flex",
+          gap: 10,
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+        }}
+      >
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
+            🌐 Web context
+          </div>
 
+          <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
+            {w ? w.text : "No relevant web result found for this bullet."}
+          </div>
+
+          {w && (
+            <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
+              Source: {w.title}
+            </div>
+          )}
+        </div>
+
+        {w ? (
+          <a
+            href={w.url}
+            target="_blank"
+            rel="noreferrer"
+            title="Open web source"
+            style={{
+              flexShrink: 0,
+              textDecoration: "none",
+              border: "1px solid #BAE6FD",
+              borderRadius: 10,
+              padding: "6px 10px",
+              background: "#FFFFFF",
+              color: "#2563EB",
+              fontWeight: 800,
+            }}
+          >
+            🔗
+          </a>
+        ) : (
+          <div
+            style={{
+              flexShrink: 0,
+              border: "1px solid #BAE6FD",
+              borderRadius: 10,
+              padding: "6px 10px",
+              background: "#FFFFFF",
+              color: "#94A3B8",
+              fontWeight: 800,
+            }}
+            title="No link available"
+          >
+            🔗
+          </div>
+        )}
+      </div>
+    );
+  })()
+)}
+
+                      
                         <button
                           className="source-pill"
                           title="Show PDF source + open preview"
@@ -925,24 +999,6 @@ JSON_END
                     </div>
                   );
                 })}
-
-                {/* WEB TAKEAWAYS */}
-                {useWeb && (
-                  <div
-                    style={{
-                      marginTop: 16,
-                      padding: 14,
-                      borderRadius: 14,
-                      border: "1px solid #e5e7eb",
-                      background: "linear-gradient(180deg, #F0F9FF 0%, #FFFFFF 100%)",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                      <div style={{ fontWeight: 900 }}>🌐 Web Takeaways</div>
-                      {webStatus && (
-                        <div style={{ fontSize: 12, color: "#64748B" }}>{webStatus}</div>
-                      )}
-                    </div>
 
                     {webTakeaways.length === 0 ? (
                       <div style={{ color: "#64748B", fontSize: 13 }}>
@@ -1207,3 +1263,4 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
