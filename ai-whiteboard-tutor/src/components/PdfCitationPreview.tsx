@@ -16,18 +16,12 @@ function normalize(s: string) {
   return (s || "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-/**
- * ✅ IMPORTANT:
- * Some builds of pdfjs-dist REQUIRE workerSrc to be set, even if you pass disableWorker:true.
- * We set it to a classic worker hosted on cdnjs (not a module import).
- */
+// worker is still required in your environment (you saw that error before)
 function ensureWorkerSrc() {
   try {
     const gwo = (pdfjsLib as any).GlobalWorkerOptions;
     if (!gwo) return;
     if (typeof gwo.workerSrc === "string" && gwo.workerSrc.length > 0) return;
-
-    // Classic worker URL (non-module) — usually works where unpkg/jsdelivr module workers fail
     gwo.workerSrc =
       "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.js";
   } catch {
@@ -68,10 +62,13 @@ export default function PdfCitationPreview({
       try {
         ensureWorkerSrc();
 
+        // ✅ IMPORTANT: avoid "detached ArrayBuffer" by using a fresh copy every time
+        const dataCopy = pdfData.slice(0);
+
         setStatus("Loading PDF…");
         const loadingTask = (pdfjsLib as any).getDocument({
-          data: pdfData,
-          // We still keep this, but workerSrc is ALSO required in your environment.
+          data: dataCopy,
+          // keep this; workerSrc still must exist in your build
           disableWorker: true,
         });
 
@@ -98,6 +95,7 @@ export default function PdfCitationPreview({
         await page.render({ canvasContext: ctx, viewport }).promise;
         if (cancelled) return;
 
+        // No highlight phrase → just show the page
         if (!wanted || wanted.length < 6) {
           setStatus("");
           return;
@@ -114,11 +112,13 @@ export default function PdfCitationPreview({
         }
 
         const itemTexts = items.map((it) => normalize(it.str || ""));
+
+        // Find a range of items whose combined text includes the phrase
         let bestRange: { start: number; end: number } | null = null;
 
         for (let start = 0; start < itemTexts.length; start++) {
           let joined = "";
-          for (let end = start; end < Math.min(itemTexts.length, start + 70); end++) {
+          for (let end = start; end < Math.min(itemTexts.length, start + 60); end++) {
             const t = itemTexts[end];
             if (t) joined = joined ? joined + " " + t : t;
 
@@ -126,28 +126,27 @@ export default function PdfCitationPreview({
               bestRange = { start, end };
               break;
             }
-            if (joined.length > wanted.length + 260) break;
+            if (joined.length > wanted.length + 220) break;
           }
           if (bestRange) break;
         }
 
+        // fallback: shorter phrase
         if (!bestRange) {
           const shorter = wanted.split(" ").slice(0, 10).join(" ");
-          if (shorter.length > 6) {
-            for (let start = 0; start < itemTexts.length; start++) {
-              let joined = "";
-              for (let end = start; end < Math.min(itemTexts.length, start + 70); end++) {
-                const t = itemTexts[end];
-                if (t) joined = joined ? joined + " " + t : t;
+          for (let start = 0; start < itemTexts.length; start++) {
+            let joined = "";
+            for (let end = start; end < Math.min(itemTexts.length, start + 60); end++) {
+              const t = itemTexts[end];
+              if (t) joined = joined ? joined + " " + t : t;
 
-                if (joined.includes(shorter)) {
-                  bestRange = { start, end };
-                  break;
-                }
-                if (joined.length > shorter.length + 260) break;
+              if (joined.includes(shorter)) {
+                bestRange = { start, end };
+                break;
               }
-              if (bestRange) break;
+              if (joined.length > shorter.length + 220) break;
             }
+            if (bestRange) break;
           }
         }
 
@@ -156,22 +155,40 @@ export default function PdfCitationPreview({
           return;
         }
 
-        const util = (pdfjsLib as any).Util;
+        // ✅ Accurate box conversion using viewport.convertToViewportRectangle
         const newBoxes: HighlightBox[] = [];
 
         for (let i = bestRange.start; i <= bestRange.end; i++) {
           const it = items[i];
           if (!it?.transform) continue;
 
-          const tx = util.transform(viewport.transform, it.transform);
-          const x = tx[4];
-          const y = tx[5];
+          // it.transform: [a,b,c,d,e,f] where e,f are x,y in PDF space
+          const e = it.transform[4];
+          const f = it.transform[5];
 
-          const w = (it.width ?? 0) * scale;
-          const h = (it.height ?? 0) * scale || 12;
-          const top = canvas.height - y - h;
+          // width/height are in PDF space units for text item
+          const w = it.width ?? 0;
+          const h = it.height ?? 0;
 
-          if (w > 2 && h > 2) newBoxes.push({ left: x, top, width: w, height: h });
+          if (!(w > 0 && h > 0)) continue;
+
+          // Convert PDF-rect -> viewport rect
+          const [vx1, vy1, vx2, vy2] = viewport.convertToViewportRectangle([
+            e,
+            f,
+            e + w,
+            f + h,
+          ]);
+
+          const left = Math.min(vx1, vx2);
+          const top = Math.min(vy1, vy2);
+          const width = Math.abs(vx2 - vx1);
+          const height = Math.abs(vy2 - vy1);
+
+          // Filter tiny junk boxes
+          if (width > 2 && height > 2) {
+            newBoxes.push({ left, top, width, height });
+          }
         }
 
         setBoxes(newBoxes);
@@ -269,8 +286,8 @@ export default function PdfCitationPreview({
                     top: b.top,
                     width: b.width,
                     height: b.height,
-                    background: "rgba(250, 204, 21, 0.35)",
-                    outline: "1px solid rgba(250, 204, 21, 0.6)",
+                    background: "rgba(250, 204, 21, 0.32)",
+                    outline: "1px solid rgba(250, 204, 21, 0.55)",
                     borderRadius: 3,
                   }}
                 />
