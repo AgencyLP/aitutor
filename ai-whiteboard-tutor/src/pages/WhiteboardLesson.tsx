@@ -607,7 +607,18 @@ parsed = { ...parsed, bullets: fixedBullets };
                             cursor: "pointer",
                             padding: "4px 8px",
                           }}
-                          onClick={() => setOpenBulletIndex(open ? null : i)}
+                          onClick={() => {
+                          setOpenBulletIndex(open ? null : i);
+
+                   // open preview directly using the first citation if available
+                  const first = b.cites?.[0];
+                  if (first) {
+                  const real = chunkMapRef.current.get(first.chunkId);
+                  const page = real?.page ?? first.page;
+                 const phrase = pickHighlightPhrase(real?.text ?? "");
+                 setPreview({ page, chunkId: first.chunkId, phrase });
+                }
+              }}
                         >
                           📄
                         </button>
@@ -642,12 +653,11 @@ parsed = { ...parsed, bullets: fixedBullets };
                                 }}
                                 title="Click to open PDF preview + highlight"
                                 onClick={() =>
-                                  setPreview({
-                                    page,
-                                    chunkId: c.chunkId,
-                                    phrase,
-                                  })
-                                }
+
+                               onClick={(e) => {
+                               e.stopPropagation();
+                               setPreview({ page, chunkId: c.chunkId, phrase });
+                               }}
                               >
                                 <div>
                                   <b>p.{page}</b> — <code>{c.chunkId}</code>
@@ -878,5 +888,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
