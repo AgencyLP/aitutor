@@ -13,8 +13,6 @@ import {
   normalizeLabels,
   type PositionedNode,
 } from "../whiteboard/diagrams/conceptMap";
-
-// ✅ NEW: PDF preview modal
 import PdfCitationPreview from "../components/PdfCitationPreview";
 
 type IndexState =
@@ -25,10 +23,7 @@ type IndexState =
 
 type Citation = { page: number; chunkId: string; quote: string };
 
-type Bullet = {
-  text: string;
-  cites: Citation[];
-};
+type Bullet = { text: string; cites: Citation[] };
 
 type Diagram = {
   type: "concept_map" | "flowchart" | "timeline";
@@ -54,7 +49,6 @@ function safeParseLesson(text: string): Lesson | null {
   const candidate = extractFirstJsonObject(text) ?? text;
   try {
     const obj = JSON.parse(candidate);
-
     if (!obj || typeof obj !== "object") return null;
     if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
@@ -115,7 +109,6 @@ function safeParseLesson(text: string): Lesson | null {
       notes: obj.notes ? String(obj.notes) : "",
     };
 
-    // Must have bullets with citations to be considered valid
     if (lesson.bullets.length === 0) return null;
     if (lesson.bullets.every((b) => (b.cites?.length ?? 0) === 0)) return null;
 
@@ -125,10 +118,9 @@ function safeParseLesson(text: string): Lesson | null {
   }
 }
 
-// ---- VOICE (free, local) ----
+// ---- VOICE ----
 function speakText(text: string) {
   if (!("speechSynthesis" in window)) return;
-
   window.speechSynthesis.cancel();
 
   const utter = new SpeechSynthesisUtterance(text);
@@ -149,15 +141,12 @@ function speakText(text: string) {
   window.speechSynthesis.speak(utter);
 }
 
-// ✅ NEW: choose a highlight phrase from real PDF chunk text
 function pickHighlightPhrase(chunkText: string) {
   const clean = (chunkText || "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
-  const words = clean.split(" ");
-  return words.slice(0, 14).join(" "); // first ~14 words usually match
+  return clean.split(" ").slice(0, 14).join(" ");
 }
 
-// ✅ NEW: snippet for showing a real PDF-backed quote
 function snippetFromChunkText(chunkText: string) {
   const clean = (chunkText || "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
@@ -168,33 +157,16 @@ export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
-  const [lessonState, setLessonState] = useState<LessonState>({
-    status: "idle",
-  });
+  const [lessonState, setLessonState] = useState<LessonState>({ status: "idle" });
 
-  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">(
-    "simple"
-  );
-
-  // ✅ Inline citations per bullet (toggle open)
+  const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
 
-  // ✅ NEW: store PDF bytes so we can render it later
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
+  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(new Map());
 
-  // ✅ NEW: map chunkId -> real chunk text (from extraction)
-  const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(
-    new Map()
-  );
+  const [preview, setPreview] = useState<null | { page: number; chunkId: string; phrase: string }>(null);
 
-  // ✅ NEW: preview modal state
-  const [preview, setPreview] = useState<null | {
-    page: number;
-    chunkId: string;
-    phrase: string;
-  }>(null);
-
-  // Default model; can override via Netlify env var.
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
@@ -204,8 +176,7 @@ export default function WhiteboardLesson() {
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
     if (indexState.status === "indexing") return "Indexing…";
-    if (indexState.status === "indexed")
-      return `Indexed ✅ (${indexState.numPages} pages)`;
+    if (indexState.status === "indexed") return `Indexed ✅ (${indexState.numPages} pages)`;
     return "Error";
   }, [indexState]);
 
@@ -217,12 +188,12 @@ export default function WhiteboardLesson() {
         setIndexState({ status: "error", message: "Please upload a PDF file." });
         return;
       }
+
       setIndexState({ status: "indexing", filename: file.name });
       setLessonState({ status: "idle" });
       setOpenBulletIndex(null);
       setPreview(null);
 
-      // ✅ Store bytes for later preview rendering
       const bytes = await file.arrayBuffer();
       setPdfData(bytes);
 
@@ -235,10 +206,7 @@ export default function WhiteboardLesson() {
         pdf,
       });
     } catch (e: any) {
-      setIndexState({
-        status: "error",
-        message: e?.message ?? "Failed to read PDF.",
-      });
+      setIndexState({ status: "error", message: e?.message ?? "Failed to read PDF." });
     }
   };
 
@@ -248,9 +216,7 @@ export default function WhiteboardLesson() {
     if (file) await handleFile(file);
   };
 
-  const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) => {
-    e.preventDefault();
-  };
+  const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) => e.preventDefault();
 
   async function startLesson() {
     if (indexState.status !== "indexed") return;
@@ -264,13 +230,9 @@ export default function WhiteboardLesson() {
       return;
     }
 
-    // ✅ Build chunks for all pages
-    const allChunks = chunkPdfPages(indexState.pdf.pages, {
-      maxChars: 900,
-      overlapChars: 120,
-    });
+    const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
 
-    // ✅ Build real chunk map (for trustworthy previews/snippets)
+    // build chunk map for preview text
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
@@ -278,7 +240,7 @@ export default function WhiteboardLesson() {
     const seedQuery =
       "summary key concepts definitions statistics findings implications conclusion";
 
-    // ✅ GUARANTEE multi-page evidence (best 1 chunk per page)
+    // guarantee at least 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -287,13 +249,11 @@ export default function WhiteboardLesson() {
 
     const guaranteed: typeof allChunks = [];
     const pages = Array.from(chunksByPage.keys()).sort((a, b) => a - b);
-
     for (const p of pages) {
       const best = retrieveTopChunks(seedQuery, chunksByPage.get(p)!, 1);
       if (best[0]) guaranteed.push(best[0]);
     }
 
-    // ✅ Add extra chunks (diverse) for richness (still capped)
     const extra = retrieveTopChunksDiverse({
       query: seedQuery,
       chunks: allChunks,
@@ -302,7 +262,6 @@ export default function WhiteboardLesson() {
       minDistinctPages: Math.min(2, indexState.numPages),
     });
 
-    // Merge unique
     const merged = [...guaranteed];
     const seen = new Set(merged.map((c) => c.id));
     for (const c of extra) {
@@ -313,11 +272,7 @@ export default function WhiteboardLesson() {
       if (merged.length >= 10) break;
     }
 
-    const evidence = merged.map((c) => ({
-      chunkId: c.id,
-      page: c.page,
-      text: c.text,
-    }));
+    const evidence = merged.map((c) => ({ chunkId: c.id, page: c.page, text: c.text }));
 
     const prompt = buildLessonPrompt({
       explainLevel,
@@ -336,7 +291,6 @@ export default function WhiteboardLesson() {
 
       let parsed = safeParseLesson(raw);
 
-      // ✅ JSON repair fallback (fixes Normal mode)
       if (!parsed) {
         const repairPrompt = buildJsonRepairPrompt(raw);
         const repaired = await generateText(modelId, repairPrompt);
@@ -345,64 +299,50 @@ export default function WhiteboardLesson() {
         if (!parsed) {
           setLessonState({
             status: "error",
-            message:
-              "Model output wasn’t valid JSON. Try again (or smaller PDF).",
+            message: "Model output wasn’t valid JSON. Try again (or smaller PDF).",
             raw,
           });
           return;
         }
       }
 
+      // ✅ Re-rank citations per bullet & reduce repetition
+      const usedChunkIds = new Set<string>();
+      const fixedBullets = parsed.bullets.map((b) => {
+        const candidates = retrieveTopChunks(b.text, allChunks, 8);
 
+        const picked: typeof candidates = [];
+        for (const c of candidates) {
+          if (!usedChunkIds.has(c.id)) {
+            picked.push(c);
+            usedChunkIds.add(c.id);
+          }
+          if (picked.length >= 2) break;
+        }
 
-      // ✅ Force citations to match each bullet text (code-grounded) + reduce repetition
-const usedChunkIds = new Set<string>();
+        if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
+        if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
 
-const fixedBullets = parsed.bullets.map((b) => {
-  // get more candidates, then pick ones not used yet
-  const candidates = retrieveTopChunks(b.text, allChunks, 8);
+        const cites = picked.map((c) => ({
+          page: c.page,
+          chunkId: c.id,
+          quote: snippetFromChunkText(c.text),
+        }));
 
-  const picked: typeof candidates = [];
-  for (const c of candidates) {
-    if (!usedChunkIds.has(c.id)) {
-      picked.push(c);
-      usedChunkIds.add(c.id);
-    }
-    if (picked.length >= 2) break;
-  }
-
-  // fallback: if everything is already used, allow reuse
-  if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
-  if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
-
-  const cites = picked.map((c) => ({
-    page: c.page,
-    chunkId: c.id,
-    quote: snippetFromChunkText(c.text),
-  }));
-
-  return { ...b, cites };
-});
-
+        return { ...b, cites };
+      });
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
       setPreview(null);
 
-      // Auto-speak
-      const speech = `${parsed.title}. ${parsed.bullets
-        .map((b) => b.text)
-        .join(" ")}`;
+      const speech = `${parsed.title}. ${parsed.bullets.map((b) => b.text).join(" ")}`;
       setLastSpoken(speech);
       speakText(speech);
     } catch (e: any) {
-      setLessonState({
-        status: "error",
-        message: e?.message ?? "Failed to generate lesson.",
-      });
+      setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
     }
   }
 
@@ -423,8 +363,7 @@ const fixedBullets = parsed.bullets.map((b) => {
               style={{
                 padding: "6px 10px",
                 fontSize: "0.8rem",
-                background:
-                  explainLevel === "simple" ? "var(--primary-grad)" : "#E8F0FE",
+                background: explainLevel === "simple" ? "var(--primary-grad)" : "#E8F0FE",
                 color: explainLevel === "simple" ? "white" : "#2C3E50",
               }}
               onClick={() => setExplainLevel("simple")}
@@ -436,8 +375,7 @@ const fixedBullets = parsed.bullets.map((b) => {
               style={{
                 padding: "6px 10px",
                 fontSize: "0.8rem",
-                background:
-                  explainLevel === "normal" ? "var(--primary-grad)" : "#E8F0FE",
+                background: explainLevel === "normal" ? "var(--primary-grad)" : "#E8F0FE",
                 color: explainLevel === "normal" ? "white" : "#2C3E50",
               }}
               onClick={() => setExplainLevel("normal")}
@@ -452,8 +390,7 @@ const fixedBullets = parsed.bullets.map((b) => {
             disabled={indexState.status !== "indexed"}
             style={{
               opacity: indexState.status === "indexed" ? 1 : 0.5,
-              cursor:
-                indexState.status === "indexed" ? "pointer" : "not-allowed",
+              cursor: indexState.status === "indexed" ? "pointer" : "not-allowed",
             }}
           >
             Start Lesson
@@ -491,7 +428,6 @@ const fixedBullets = parsed.bullets.map((b) => {
       </header>
 
       <div className="workspace">
-        {/* LEFT DRAWER */}
         <aside className="drawer-left">
           <div
             className="upload-zone"
@@ -503,17 +439,13 @@ const fixedBullets = parsed.bullets.map((b) => {
             title="Click to upload or drag a PDF here"
           >
             <p style={{ margin: 0 }}>
-              {indexState.status === "indexed"
-                ? `PDF: ${indexState.filename}`
-                : "Click or drag PDF here"}
+              {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
             </p>
 
             <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
-              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>
-                {indexState.message}
-              </div>
+              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
             )}
           </div>
 
@@ -536,12 +468,8 @@ const fixedBullets = parsed.bullets.map((b) => {
                 • Model: <span style={{ opacity: 0.8 }}>{modelId}</span>
               </li>
               {lessonState.status === "idle" && <li>• Ready to start lesson</li>}
-              {lessonState.status === "loadingModel" && (
-                <li>• Loading: {lessonState.message}</li>
-              )}
-              {lessonState.status === "generating" && (
-                <li>• {lessonState.message}</li>
-              )}
+              {lessonState.status === "loadingModel" && <li>• Loading: {lessonState.message}</li>}
+              {lessonState.status === "generating" && <li>• {lessonState.message}</li>}
               {lessonState.status === "ready" && <li>• Lesson generated ✅</li>}
               {lessonState.status === "error" && (
                 <li style={{ color: "#B91C1C" }}>• {lessonState.message}</li>
@@ -550,20 +478,14 @@ const fixedBullets = parsed.bullets.map((b) => {
           </div>
         </aside>
 
-        {/* CENTER WHITEBOARD */}
         <main className="whiteboard-stage">
           <div className="whiteboard-surface">
             {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
-                  <strong>
-                    {indexState.status === "indexed"
-                      ? "Ready. Click Start Lesson."
-                      : "Upload a PDF to start."}
-                  </strong>
+                  <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
-                    This demo runs AI on your laptop (WebGPU) and teaches from
-                    the PDF only.
+                    This demo runs AI on your laptop (WebGPU) and teaches from the PDF only.
                   </div>
                 </div>
 
@@ -582,48 +504,31 @@ const fixedBullets = parsed.bullets.map((b) => {
                 {lessonState.lesson.bullets.map((b, i) => {
                   const open = openBulletIndex === i;
                   return (
-                    <div
-                      key={i}
-                      className="lesson-chunk"
-                      style={{ marginBottom: 12 }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "flex-start",
-                          gap: 8,
-                        }}
-                      >
+                    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ marginTop: 2 }}>•</div>
                         <div style={{ flex: 1 }}>{b.text}</div>
 
-                        {/* Icon next to each bullet */}
                         <button
                           className="source-pill"
-                          title="Show PDF source"
-                          style={{
-                            border: "none",
-                            cursor: "pointer",
-                            padding: "4px 8px",
-                          }}
+                          title="Show PDF source + open preview"
+                          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
                           onClick={() => {
-                          setOpenBulletIndex(open ? null : i);
+                            setOpenBulletIndex(open ? null : i);
 
-                   // open preview directly using the first citation if available
-                  const first = b.cites?.[0];
-                  if (first) {
-                  const real = chunkMapRef.current.get(first.chunkId);
-                  const page = real?.page ?? first.page;
-                 const phrase = pickHighlightPhrase(real?.text ?? "");
-                 setPreview({ page, chunkId: first.chunkId, phrase });
-                }
-              }}
+                            const first = b.cites?.[0];
+                            if (first) {
+                              const real = chunkMapRef.current.get(first.chunkId);
+                              const page = real?.page ?? first.page;
+                              const phrase = pickHighlightPhrase(real?.text ?? "");
+                              setPreview({ page, chunkId: first.chunkId, phrase });
+                            }
+                          }}
                         >
                           📄
                         </button>
                       </div>
 
-                      {/* Inline citations under that bullet */}
                       {open && b.cites?.length > 0 && (
                         <div
                           style={{
@@ -651,11 +556,10 @@ const fixedBullets = parsed.bullets.map((b) => {
                                   cursor: "pointer",
                                 }}
                                 title="Click to open PDF preview + highlight"
-                                onClick={() =>
                                 onClick={(e) => {
-                                 e.stopPropagation();
-                                 setPreview({ page, chunkId: c.chunkId, phrase });
-                              }}     
+                                  e.stopPropagation();
+                                  setPreview({ page, chunkId: c.chunkId, phrase });
+                                }}
                               >
                                 <div>
                                   <b>p.{page}</b> — <code>{c.chunkId}</code>
@@ -674,56 +578,42 @@ const fixedBullets = parsed.bullets.map((b) => {
 
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
-                {lessonState.lesson.notes &&
-                  lessonState.lesson.notes !== "string" && (
-                    <div
-                      style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}
-                    >
-                      Note: {lessonState.lesson.notes}
-                    </div>
-                  )}
+                {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
+                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
+                    Note: {lessonState.lesson.notes}
+                  </div>
+                )}
               </>
             )}
           </div>
         </main>
 
-        {/* RIGHT DRAWER */}
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
             <div className="quote-box">
               <em style={{ color: "#64748B" }}>
-                Click 📄 next to a bullet, then click a citation to open PDF
-                preview with highlight.
+                Click 📄 next to a bullet, then click a citation to open PDF preview with highlight.
               </em>
             </div>
 
             {lessonState.status === "error" && lessonState.raw && (
               <details>
-                <summary style={{ cursor: "pointer" }}>
-                  Show raw model output
-                </summary>
-                <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
-                  {lessonState.raw}
-                </pre>
+                <summary style={{ cursor: "pointer" }}>Show raw model output</summary>
+                <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{lessonState.raw}</pre>
               </details>
             )}
           </div>
         </aside>
       </div>
 
-      {/* ✅ PDF Preview Modal */}
       <PdfCitationPreview
         open={!!preview}
         onClose={() => setPreview(null)}
         pdfData={pdfData}
         pageNumber={preview?.page ?? 1}
         highlightPhrase={preview?.phrase ?? ""}
-        header={
-          preview
-            ? `PDF Preview — p.${preview.page} (${preview.chunkId})`
-            : undefined
-        }
+        header={preview ? `PDF Preview — p.${preview.page} (${preview.chunkId})` : undefined}
       />
     </>
   );
@@ -750,32 +640,9 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
             const y = startY + i * (boxH + gap);
             return (
               <g key={n.id ?? i}>
-                {i > 0 && (
-                  <line
-                    x1={x}
-                    y1={y - gap}
-                    x2={x}
-                    y2={y}
-                    stroke="#94A3B8"
-                    strokeWidth={2}
-                  />
-                )}
-                <rect
-                  x={x - boxW / 2}
-                  y={y}
-                  width={boxW}
-                  height={boxH}
-                  rx={10}
-                  fill="#FFFFFF"
-                  stroke="#CBD5E0"
-                />
-                <text
-                  x={x}
-                  y={y + 24}
-                  fontSize={13}
-                  fill="#0F172A"
-                  textAnchor="middle"
-                >
+                {i > 0 && <line x1={x} y1={y - gap} x2={x} y2={y} stroke="#94A3B8" strokeWidth={2} />}
+                <rect x={x - boxW / 2} y={y} width={boxW} height={boxH} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+                <text x={x} y={y + 24} fontSize={13} fill="#0F172A" textAnchor="middle">
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -802,32 +669,9 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
             const x = startX + i * (boxW + 20);
             return (
               <g key={n.id ?? i}>
-                {i > 0 && (
-                  <line
-                    x1={x - 20}
-                    y1={y}
-                    x2={x}
-                    y2={y}
-                    stroke="#94A3B8"
-                    strokeWidth={2}
-                  />
-                )}
-                <rect
-                  x={x}
-                  y={y - boxH / 2}
-                  width={boxW}
-                  height={boxH}
-                  rx={10}
-                  fill="#FFFFFF"
-                  stroke="#CBD5E0"
-                />
-                <text
-                  x={x + boxW / 2}
-                  y={y + 5}
-                  fontSize={13}
-                  fill="#0F172A"
-                  textAnchor="middle"
-                >
+                {i > 0 && <line x1={x - 20} y1={y} x2={x} y2={y} stroke="#94A3B8" strokeWidth={2} />}
+                <rect x={x} y={y - boxH / 2} width={boxW} height={boxH} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+                <text x={x + boxW / 2} y={y + 5} fontSize={13} fill="#0F172A" textAnchor="middle">
                   {String(n.label || "").slice(0, 22)}
                 </text>
               </g>
@@ -838,7 +682,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     );
   }
 
-  // Default: concept_map star layout
   const nodes: PositionedNode[] = useMemo(() => {
     const cleaned = normalizeLabels((diagram.nodes ?? [])).slice(0, 7);
     return layoutStar(cleaned, width, height);
@@ -849,35 +692,13 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
       <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
         {nodes.length > 1 &&
           nodes.slice(1).map((n, idx) => (
-            <line
-              key={idx}
-              x1={nodes[0].x}
-              y1={nodes[0].y}
-              x2={n.x}
-              y2={n.y}
-              stroke="#94A3B8"
-              strokeWidth={2}
-            />
+            <line key={idx} x1={nodes[0].x} y1={nodes[0].y} x2={n.x} y2={n.y} stroke="#94A3B8" strokeWidth={2} />
           ))}
 
         {nodes.map((n) => (
           <g key={n.id}>
-            <rect
-              x={n.x - 75}
-              y={n.y - 19}
-              width={150}
-              height={38}
-              rx={10}
-              fill="#FFFFFF"
-              stroke="#CBD5E0"
-            />
-            <text
-              x={n.x}
-              y={n.y + 4}
-              fontSize={13}
-              fill="#0F172A"
-              textAnchor="middle"
-            >
+            <rect x={n.x - 75} y={n.y - 19} width={150} height={38} rx={10} fill="#FFFFFF" stroke="#CBD5E0" />
+            <text x={n.x} y={n.y + 4} fontSize={13} fill="#0F172A" textAnchor="middle">
               {n.label.length > 22 ? n.label.slice(0, 22) + "…" : n.label}
             </text>
           </g>
@@ -886,7 +707,3 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
-
-
-
-
