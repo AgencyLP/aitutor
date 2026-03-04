@@ -179,6 +179,8 @@ export default function WhiteboardLesson() {
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
   const [useWeb, setUseWeb] = useState<boolean>(false);
   const [openWebIndex, setOpenWebIndex] = useState<number | null>(null);
+  const [webStatus, setWebStatus] = useState<string>("");
+  const [webResults, setWebResults] = useState<WebResult[]>([]);
 
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
   const chunkMapRef = useRef<Map<string, { page: number; text: string }>>(new Map());
@@ -547,8 +549,10 @@ export default function WhiteboardLesson() {
           </div>
         </aside>
 
-        <main className="whiteboard-stage">
-          <div className="whiteboard-surface">
+        <div
+          className="whiteboard-surface"
+          style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}
+        >
             {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
@@ -607,24 +611,6 @@ export default function WhiteboardLesson() {
           }}
         >
           📄
-        </button>
-
-        <button
-          className="source-pill"
-          title="Show web sources"
-          style={{
-            border: "none",
-            cursor: useWeb ? "pointer" : "not-allowed",
-            padding: "4px 8px",
-            opacity: useWeb ? 1 : 0.4,
-          }}
-          disabled={!useWeb}
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpenWebIndex(openWeb ? null : i);
-          }}
-        >
-          🌐
         </button>
       </div>
 
@@ -717,8 +703,72 @@ export default function WhiteboardLesson() {
   );
 })}
 
-                
+{useWeb && (
+  <div
+    style={{
+      marginTop: 16,
+      padding: 14,
+      borderRadius: 14,
+      border: "1px solid #e5e7eb",
+      background: "linear-gradient(180deg, #F0F9FF 0%, #FFFFFF 100%)",
+    }}
+  >
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+      <div style={{ fontWeight: 800 }}>🌐 Web Sources</div>
+      {webStatus && <div style={{ fontSize: 12, color: "#64748B" }}>{webStatus}</div>}
+    </div>
 
+    {webResults.length === 0 ? (
+      <div style={{ color: "#64748B", fontSize: 13 }}>
+        Nothing to show (web search returned no results).
+      </div>
+    ) : (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {webResults.map((w, idx) => (
+          <div
+            key={idx}
+            style={{
+              padding: 10,
+              borderRadius: 12,
+              border: "1px solid #e2e8f0",
+              background: "#ffffff",
+            }}
+          >
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid #e2e8f0",
+                  color: "#334155",
+                }}
+              >
+                {w.source === "wikipedia" ? "Wikipedia" : "DuckDuckGo"}
+              </div>
+
+              <a
+                href={w.url}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
+              >
+                {w.title}
+              </a>
+            </div>
+
+            {w.snippet && (
+              <div style={{ marginTop: 6, fontSize: 13, color: "#475569" }}>
+                {w.snippet}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+)}
+  
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
                 {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
@@ -850,6 +900,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
