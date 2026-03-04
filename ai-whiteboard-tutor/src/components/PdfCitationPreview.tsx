@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 
+(pdfjsLib as any).GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.js";
+
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc =
 `https://cdn.jsdelivr.net/npm/pdfjs-dist@${(pdfjsLib as any).version}/build/pdf.worker.min.js`;
 
