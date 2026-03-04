@@ -602,19 +602,6 @@ export default function WhiteboardLesson() {
                       </div>
 
                       {open && b.cites?.length > 0 && (
-                        <div
-                          style={{
-                            marginTop: 8,
-                            marginLeft: 18,
-                            padding: 10,
-                            border: "1px solid #e5e7eb",
-                            borderRadius: 10,
-                            background: "#fff",
-                            fontSize: 12,
-                            color: "#334155",
-                          }}
-
-                          {useWeb && openWebIndex === i && b.webCites && b.webCites.length > 0 && (
   <div
     style={{
       marginTop: 8,
@@ -627,8 +614,36 @@ export default function WhiteboardLesson() {
       color: "#334155",
     }}
   >
-    {b.webCites.map((w, idx) => (
-      <div
+    {b.cites.map((c, idx) => {
+      const real = chunkMapRef.current.get(c.chunkId);
+      const page = real?.page ?? c.page;
+      const phrase = pickHighlightPhrase(real?.text ?? "");
+      return (
+        <div
+          key={idx}
+          style={{
+            marginBottom: 10,
+            paddingBottom: 10,
+            borderBottom: "1px solid #f1f5f9",
+            cursor: "pointer",
+          }}
+          title="Click to open PDF preview + highlight"
+          onClick={(e) => {
+            e.stopPropagation();
+            setPreview({ page, chunkId: c.chunkId, phrase });
+          }}
+        >
+          <div>
+            <b>p.{page}</b> — <code>{c.chunkId}</code>
+          </div>
+          <div style={{ opacity: 0.9 }}>
+            "{phrase ? phrase + "…" : c.quote}"
+          </div>
+        </div>
+      );
+    })}
+  </div>
+)}
         key={idx}
         style={{
           marginBottom: 10,
@@ -816,6 +831,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
