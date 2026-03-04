@@ -25,7 +25,6 @@ type IndexState =
   | { status: "error"; message: string };
 
 type Citation = { page: number; chunkId: string; quote: string };
-
 type Bullet = { text: string; cites: Citation[] };
 
 type Diagram = {
@@ -50,10 +49,8 @@ type LessonState =
 
 type WebTakeaway = {
   bulletIndex: number;
-  text: string; // 1 short sentence
-  url: string;
-  title: string;
-  source: string;
+  text: string; // one sentence
+  url: string; // link to open when clicking 🌐
 };
 
 function extractBetween(text: string, startTag: string, endTag: string) {
@@ -73,7 +70,6 @@ function safeParseLesson(text: string): Lesson | null {
 
   try {
     const obj = JSON.parse(candidate);
-
     if (!obj || typeof obj !== "object") return null;
     if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
@@ -102,7 +98,7 @@ function safeParseLesson(text: string): Lesson | null {
                   )
               : [],
           }))
-          .filter((b: any) => b.text)
+          .filter((b: any) => b.text && b.text.toLowerCase() !== "string")
           .slice(0, 12)
       : [];
 
@@ -177,7 +173,7 @@ function tokenize(s: string) {
 
 function scoreBulletToWeb(bulletText: string, r: WebResult) {
   const a = tokenize(bulletText);
-  const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 300));
+  const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 280));
   const setB = new Set(b);
   let hit = 0;
   for (const t of a) if (setB.has(t)) hit++;
@@ -197,15 +193,13 @@ function snippetFromChunkText(chunkText: string) {
 }
 
 function buildWebTakeawaysPrompt(params: {
-  lessonTitle: string;
   bullets: string[];
-  picks: Array<{ bulletIndex: number; source: string; title: string; snippet: string; url: string }>;
+  picks: Array<{ bulletIndex: number; title: string; snippet: string; url: string }>;
 }) {
   const picksBlock = params.picks
     .map(
       (p) => `
 BULLET_INDEX: ${p.bulletIndex}
-SOURCE: ${p.source}
 TITLE: ${p.title}
 SNIPPET: ${p.snippet}
 URL: ${p.url}
@@ -214,36 +208,24 @@ URL: ${p.url}
     .join("\n\n---\n\n");
 
   return `
-You are writing 1 SHORT web sentence per bullet for an EdTech tutor UI.
+Write ONE short web sentence per bullet.
 
 Rules:
-- Use ONLY the snippet text. Do NOT invent facts.
+- Use ONLY the provided snippet (do NOT invent facts).
 - Output MUST be valid JSON ONLY.
-- No headings, no markdown.
-- Text must be 1 sentence (max ~22 words), plain tutor style.
+- Text: 1 sentence, tutor style, max ~22 words.
+- No headings, no labels.
 
 Return JSON array:
 [
-  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "web" }
+  { "bulletIndex": 0, "text": "one sentence", "url": "https://..." }
 ]
-
-LESSON_TITLE: ${params.lessonTitle}
 
 BULLETS:
 ${params.bullets.map((b, i) => `${i}: ${b}`).join("\n")}
 
 WEB_PICKS:
 ${picksBlock}
-`.trim();
-}
-
-function buildWebTakeawaysRepairPrompt(badText: string) {
-  return `
-Rewrite into VALID JSON ONLY. Must be an array of:
-{ "bulletIndex": 0, "text": "...", "url":"https://...", "title":"...", "source":"web" }
-
-TEXT:
-${badText}
 `.trim();
 }
 
@@ -264,17 +246,8 @@ function safeParseWebTakeaways(text: string): WebTakeaway[] | null {
         bulletIndex: Number(x?.bulletIndex),
         text: String(x?.text ?? "").trim(),
         url: String(x?.url ?? "").trim(),
-        title: String(x?.title ?? "").trim(),
-        source: String(x?.source ?? "web").trim(),
       }))
-      .filter(
-        (x) =>
-          Number.isFinite(x.bulletIndex) &&
-          x.bulletIndex >= 0 &&
-          x.text &&
-          x.url &&
-          x.title
-      );
+      .filter((x) => Number.isFinite(x.bulletIndex) && x.text && x.url);
 
     return out.length ? out : null;
   } catch {
@@ -291,8 +264,8 @@ export default function WhiteboardLesson() {
   const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
 
-  const [useWeb, setUseWeb] = useState<boolean>(false);
-  const [webStatus, setWebStatus] = useState<string>("");
+  const [useWeb, setUseWeb] = useState(false);
+  const [webStatus, setWebStatus] = useState("");
   const [webTakeaways, setWebTakeaways] = useState<WebTakeaway[]>([]);
 
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
@@ -304,7 +277,7 @@ export default function WhiteboardLesson() {
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
-  const [lastSpoken, setLastSpoken] = useState<string>("");
+  const [lastSpoken, setLastSpoken] = useState("");
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -326,12 +299,11 @@ export default function WhiteboardLesson() {
       setLessonState({ status: "idle" });
       setOpenBulletIndex(null);
       setPreview(null);
-
       setWebStatus("");
       setWebTakeaways([]);
 
       const bytes = await file.arrayBuffer();
-      setPdfData(bytes.slice(0));
+      setPdfData(bytes.slice(0)); // avoids detached ArrayBuffer issues
 
       const pdf = await extractPdfText(file);
 
@@ -376,6 +348,7 @@ export default function WhiteboardLesson() {
 
     const seedQuery = "summary key concepts definitions statistics findings implications conclusion";
 
+    // 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -450,6 +423,7 @@ JSON_END
         }
       }
 
+      // Fix citations per bullet
       const usedChunkIds = new Set<string>();
       const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
@@ -477,19 +451,17 @@ JSON_END
 
       parsed = { ...parsed, bullets: fixedBullets };
 
+      // Web takeaways: 1 sentence per bullet (optional)
       if (useWeb) {
         try {
           setWebStatus("Searching web…");
 
-          const lessonTitle = parsed.title || "EdTech AI";
-          const queries = [
-            lessonTitle,
-            `${lessonTitle} statistics`,
-            "Artificial intelligence in education",
-            "Intelligent tutoring system",
-          ];
-
-          const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
+          const lessonTitle = parsed.title || "Education";
+          const pools = await Promise.all([
+            webSearchPool(lessonTitle),
+            webSearchPool(`${lessonTitle} statistics`),
+            webSearchPool("Artificial intelligence in education"),
+          ]);
 
           const mergedWeb: WebResult[] = [];
           const seenUrls = new Set<string>();
@@ -502,6 +474,7 @@ JSON_END
             }
           }
 
+          // best pick per bullet
           const picks = parsed.bullets
             .map((b, i) => {
               const ranked = [...mergedWeb]
@@ -514,54 +487,34 @@ JSON_END
 
               return {
                 bulletIndex: i,
-                source: String(top.source || "web"),
                 title: String(top.title || "").trim(),
                 snippet: String(top.snippet || "").slice(0, 320),
                 url: String(top.url || "").trim(),
               };
             })
-            .filter(Boolean) as Array<{
-            bulletIndex: number;
-            source: string;
-            title: string;
-            snippet: string;
-            url: string;
-          }>;
+            .filter(Boolean) as Array<{ bulletIndex: number; title: string; snippet: string; url: string }>;
 
-          setWebStatus(`Web results: ${mergedWeb.length} — writing 1-line takeaways…`);
+          setWebStatus(`Found ${mergedWeb.length} results — writing web sentences…`);
 
           const webPrompt = buildWebTakeawaysPrompt({
-            lessonTitle,
             bullets: parsed.bullets.map((b) => b.text),
             picks,
           });
 
-          const webRaw = await generateText(
-            modelId,
-            `JSON_START\n${webPrompt}\nJSON_END`
-          );
-
+          const webRaw = await generateText(modelId, `JSON_START\n${webPrompt}\nJSON_END`);
           let takeaways = safeParseWebTakeaways(webRaw);
 
           if (!takeaways) {
-            const repaired = await generateText(modelId, buildWebTakeawaysRepairPrompt(webRaw));
-            takeaways = safeParseWebTakeaways(repaired);
-          }
-
-          if (!takeaways) {
-            setWebStatus("Web takeaways failed (JSON). Using snippet fallback.");
-            const fallback: WebTakeaway[] = picks.slice(0, 12).map((p) => ({
+            // fallback = show snippet as one line
+            takeaways = picks.map((p) => ({
               bulletIndex: p.bulletIndex,
               text: p.snippet ? p.snippet.slice(0, 160) : "No snippet available.",
               url: p.url,
-              title: p.title || "Web result",
-              source: p.source || "web",
             }));
-            setWebTakeaways(fallback);
-          } else {
-            setWebTakeaways(takeaways.slice(0, 12));
-            setWebStatus(`Web takeaways ready ✅ (${takeaways.length})`);
           }
+
+          setWebTakeaways(takeaways);
+          setWebStatus(`Web ready ✅ (${takeaways.length})`);
         } catch (e: any) {
           setWebTakeaways([]);
           setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
@@ -630,7 +583,7 @@ JSON_END
               background: useWeb ? "var(--primary-grad)" : "#E8F0FE",
               color: useWeb ? "white" : "#2C3E50",
             }}
-            title="Toggle web sources (Wikipedia + DuckDuckGo)"
+            title="Toggle web sentences"
           >
             {useWeb ? "🌐 PDF + Web" : "📄 PDF only"}
           </button>
@@ -739,7 +692,7 @@ JSON_END
                 <div className="lesson-chunk">
                   <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
-                    This demo runs AI on your laptop (WebGPU) and teaches from the PDF.
+                    PDF bullets + (optional) 1 web sentence under each bullet.
                   </div>
                 </div>
 
@@ -755,18 +708,39 @@ JSON_END
 
                 {lessonState.lesson.bullets.map((b, i) => {
                   const openPdf = openBulletIndex === i;
-                  const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : null;
+                  const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : undefined;
 
                   return (
                     <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-                      {/* PDF line + PDF button */}
-                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                      {/* Top row: PDF bullet + buttons */}
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                         <div style={{ marginTop: 2 }}>•</div>
-                        <div style={{ flex: 1 }}>{b.text}</div>
 
+                        <div style={{ flex: 1, lineHeight: 1.45 }}>
+                          <div>{b.text}</div>
+
+                          {/* Simple blue web sentence (clean) */}
+                          {useWeb && (
+                            <div
+                              style={{
+                                marginTop: 8,
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                border: "1px solid #7DD3FC",
+                                background: "#E0F2FE",
+                                color: "#0F172A",
+                                fontSize: 13,
+                              }}
+                            >
+                              {w ? w.text : "No web sentence available for this bullet."}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* PDF button */}
                         <button
                           className="source-pill"
-                          title="Show PDF source + open preview"
+                          title="Show PDF citations + open preview"
                           style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
                           onClick={() => {
                             setOpenBulletIndex(openPdf ? null : i);
@@ -782,83 +756,31 @@ JSON_END
                         >
                           📄
                         </button>
-                      </div>
 
-                      {/* WEB line under PDF line (blue box) */}
-                      {useWeb && (
-                        <div
+                        {/* Web button (same place, opens link) */}
+                        <button
+                          className="source-pill"
+                          title={useWeb ? (w?.url ? "Open web link" : "No web link yet") : "Turn on Web mode first"}
                           style={{
-                            marginTop: 8,
-                            marginLeft: 18,
-                            padding: 10,
-                            borderRadius: 12,
-                            border: "1px solid #BAE6FD",
-                            background: "#F0F9FF",
-                            display: "flex",
-                            gap: 10,
-                            alignItems: "flex-start",
-                            justifyContent: "space-between",
+                            border: "none",
+                            padding: "4px 8px",
+                            cursor: useWeb && w?.url ? "pointer" : "not-allowed",
+                            opacity: useWeb ? 1 : 0.45,
+                          }}
+                          disabled={!useWeb || !w?.url}
+                          onClick={() => {
+                            if (w?.url) window.open(w.url, "_blank", "noreferrer");
                           }}
                         >
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
-                              🌐 Web context
-                            </div>
+                          🌐
+                        </button>
+                      </div>
 
-                            <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
-                              {w ? w.text : "No relevant web result found for this bullet."}
-                            </div>
-
-                            {w && (
-                              <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
-                                Source: {w.title}
-                              </div>
-                            )}
-                          </div>
-
-                          {w ? (
-                            <a
-                              href={w.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              title="Open web source"
-                              style={{
-                                flexShrink: 0,
-                                textDecoration: "none",
-                                border: "1px solid #BAE6FD",
-                                borderRadius: 10,
-                                padding: "6px 10px",
-                                background: "#FFFFFF",
-                                color: "#2563EB",
-                                fontWeight: 800,
-                              }}
-                            >
-                              🔗
-                            </a>
-                          ) : (
-                            <div
-                              style={{
-                                flexShrink: 0,
-                                border: "1px solid #BAE6FD",
-                                borderRadius: 10,
-                                padding: "6px 10px",
-                                background: "#FFFFFF",
-                                color: "#94A3B8",
-                                fontWeight: 800,
-                              }}
-                              title="No link available"
-                            >
-                              🔗
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* PDF citations */}
+                      {/* PDF citations list */}
                       {openPdf && b.cites?.length > 0 && (
                         <div
                           style={{
-                            marginTop: 8,
+                            marginTop: 10,
                             marginLeft: 18,
                             padding: 10,
                             border: "1px solid #e5e7eb",
@@ -903,7 +825,9 @@ JSON_END
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
                 {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
-                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>Note: {lessonState.lesson.notes}</div>
+                  <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
+                    Note: {lessonState.lesson.notes}
+                  </div>
                 )}
               </>
             )}
@@ -915,9 +839,7 @@ JSON_END
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
             <div className="quote-box">
-              <em style={{ color: "#64748B" }}>
-                Click 📄 next to a bullet, then click a citation to open PDF preview with highlight.
-              </em>
+              <em style={{ color: "#64748B" }}>📄 shows PDF evidence. 🌐 opens the best web link.</em>
             </div>
 
             {lessonState.status === "error" && lessonState.raw && (
