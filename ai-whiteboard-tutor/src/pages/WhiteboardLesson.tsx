@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { extractPdfText, type ExtractedPdf } from "../rag/pdfExtract";
 import {
   buildLessonPrompt,
@@ -49,8 +49,10 @@ type LessonState =
 
 type WebTakeaway = {
   bulletIndex: number;
-  text: string; // one sentence
-  url: string; // link to open when clicking 🌐
+  text: string;
+  url: string;
+  title: string;
+  source: string; // keep string (wikipedia/duckduckgo/web)
 };
 
 function extractBetween(text: string, startTag: string, endTag: string) {
@@ -70,6 +72,7 @@ function safeParseLesson(text: string): Lesson | null {
 
   try {
     const obj = JSON.parse(candidate);
+
     if (!obj || typeof obj !== "object") return null;
     if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
@@ -98,7 +101,7 @@ function safeParseLesson(text: string): Lesson | null {
                   )
               : [],
           }))
-          .filter((b: any) => b.text && b.text.toLowerCase() !== "string")
+          .filter((b: any) => b.text)
           .slice(0, 12)
       : [];
 
@@ -132,34 +135,13 @@ function safeParseLesson(text: string): Lesson | null {
 
     if (!lesson.title || lesson.title.toLowerCase() === "string") return null;
     if (lesson.bullets.length === 0) return null;
+    if (lesson.bullets.some((b) => b.text.toLowerCase() === "string")) return null;
     if (lesson.bullets.every((b) => (b.cites?.length ?? 0) === 0)) return null;
 
     return lesson;
   } catch {
     return null;
   }
-}
-
-function speakText(text: string) {
-  if (!("speechSynthesis" in window)) return;
-  window.speechSynthesis.cancel();
-
-  const utter = new SpeechSynthesisUtterance(text);
-  utter.rate = 1.0;
-  utter.pitch = 1.0;
-  utter.volume = 1.0;
-
-  const voices = window.speechSynthesis.getVoices();
-  const preferThai =
-    voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
-  const preferEnglish =
-    voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
-
-  if (preferThai) utter.voice = preferThai;
-  else if (preferEnglish) utter.voice = preferEnglish;
-  else if (voices[0]) utter.voice = voices[0];
-
-  window.speechSynthesis.speak(utter);
 }
 
 function tokenize(s: string) {
@@ -173,7 +155,7 @@ function tokenize(s: string) {
 
 function scoreBulletToWeb(bulletText: string, r: WebResult) {
   const a = tokenize(bulletText);
-  const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 280));
+  const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 300));
   const setB = new Set(b);
   let hit = 0;
   for (const t of a) if (setB.has(t)) hit++;
@@ -193,13 +175,15 @@ function snippetFromChunkText(chunkText: string) {
 }
 
 function buildWebTakeawaysPrompt(params: {
+  lessonTitle: string;
   bullets: string[];
-  picks: Array<{ bulletIndex: number; title: string; snippet: string; url: string }>;
+  picks: Array<{ bulletIndex: number; source: string; title: string; snippet: string; url: string }>;
 }) {
   const picksBlock = params.picks
     .map(
       (p) => `
 BULLET_INDEX: ${p.bulletIndex}
+SOURCE: ${p.source}
 TITLE: ${p.title}
 SNIPPET: ${p.snippet}
 URL: ${p.url}
@@ -208,24 +192,40 @@ URL: ${p.url}
     .join("\n\n---\n\n");
 
   return `
-Write ONE short web sentence per bullet.
+You are writing "Web Takeaways" for an EdTech AI tutor UI.
 
-Rules:
-- Use ONLY the provided snippet (do NOT invent facts).
+RULES (very important):
+- Use ONLY the provided snippets. Do NOT invent facts.
+- Write 1 short sentence that SUPPORTS or ADDS CONTEXT for the bullet topic.
 - Output MUST be valid JSON ONLY.
-- Text: 1 sentence, tutor style, max ~22 words.
-- No headings, no labels.
+- Do NOT output placeholder words like "string".
+- Keep it concise.
 
-Return JSON array:
+Return JSON array with EXACT schema:
 [
-  { "bulletIndex": 0, "text": "one sentence", "url": "https://..." }
+  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "wikipedia|duckduckgo|web" }
 ]
+
+LESSON_TITLE: ${params.lessonTitle}
 
 BULLETS:
 ${params.bullets.map((b, i) => `${i}: ${b}`).join("\n")}
 
 WEB_PICKS:
 ${picksBlock}
+`.trim();
+}
+
+function buildWebTakeawaysRepairPrompt(badText: string) {
+  return `
+Rewrite the following into VALID JSON ONLY.
+It must be a JSON array of objects exactly like:
+[
+  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "web" }
+]
+
+TEXT:
+${badText}
 `.trim();
 }
 
@@ -246,13 +246,92 @@ function safeParseWebTakeaways(text: string): WebTakeaway[] | null {
         bulletIndex: Number(x?.bulletIndex),
         text: String(x?.text ?? "").trim(),
         url: String(x?.url ?? "").trim(),
+        title: String(x?.title ?? "").trim(),
+        source: String(x?.source ?? "web").trim(),
       }))
-      .filter((x) => Number.isFinite(x.bulletIndex) && x.text && x.url);
+      .filter(
+        (x) =>
+          Number.isFinite(x.bulletIndex) &&
+          x.bulletIndex >= 0 &&
+          x.text &&
+          x.url &&
+          x.title
+      );
 
     return out.length ? out : null;
   } catch {
     return null;
   }
+}
+
+/** ✅ Free mini-avatar (no model) that animates while speaking */
+function AvatarSpeaker({ speaking }: { speaking: boolean }) {
+  const [mouthOpen, setMouthOpen] = useState(false);
+
+  useEffect(() => {
+    if (!speaking) {
+      setMouthOpen(false);
+      return;
+    }
+    const id = window.setInterval(() => setMouthOpen((v) => !v), 120);
+    return () => window.clearInterval(id);
+  }, [speaking]);
+
+  return (
+    <div style={{ width: "100%", display: "flex", justifyContent: "center", padding: "10px 0 6px" }}>
+      <div
+        style={{
+          width: 112,
+          height: 112,
+          borderRadius: 999,
+          background: "linear-gradient(180deg, #E0F2FE 0%, #FFFFFF 100%)",
+          border: "1px solid #BAE6FD",
+          boxShadow: "0 10px 22px rgba(2,132,199,0.12)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexDirection: "column",
+          gap: 10,
+          position: "relative",
+          userSelect: "none",
+        }}
+        title="Free animated avatar"
+      >
+        <div style={{ display: "flex", gap: 18 }}>
+          <div style={{ width: 10, height: 10, borderRadius: 999, background: "#0f172a" }} />
+          <div style={{ width: 10, height: 10, borderRadius: 999, background: "#0f172a" }} />
+        </div>
+
+        <div
+          style={{
+            width: mouthOpen ? 44 : 34,
+            height: mouthOpen ? 14 : 8,
+            borderRadius: 999,
+            background: "#0f172a",
+            transition: "all 120ms ease",
+          }}
+        />
+
+        <div
+          style={{
+            position: "absolute",
+            bottom: -10,
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "4px 10px",
+            borderRadius: 999,
+            border: "1px solid #e2e8f0",
+            background: "#fff",
+            fontSize: 12,
+            color: speaking ? "#0284c7" : "#64748b",
+            fontWeight: 800,
+          }}
+        >
+          {speaking ? "Speaking…" : "Ready"}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function WhiteboardLesson() {
@@ -264,8 +343,8 @@ export default function WhiteboardLesson() {
   const [explainLevel, setExplainLevel] = useState<"simple" | "normal">("simple");
   const [openBulletIndex, setOpenBulletIndex] = useState<number | null>(null);
 
-  const [useWeb, setUseWeb] = useState(false);
-  const [webStatus, setWebStatus] = useState("");
+  const [useWeb, setUseWeb] = useState<boolean>(false);
+  const [webStatus, setWebStatus] = useState<string>("");
   const [webTakeaways, setWebTakeaways] = useState<WebTakeaway[]>([]);
 
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
@@ -273,11 +352,40 @@ export default function WhiteboardLesson() {
 
   const [preview, setPreview] = useState<null | { page: number; chunkId: string; phrase: string }>(null);
 
+  const [lastSpoken, setLastSpoken] = useState<string>("");
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
-  const [lastSpoken, setLastSpoken] = useState("");
+  function speakTextLocal(text: string) {
+    if (!("speechSynthesis" in window)) return;
+
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = 1.0;
+    utter.pitch = 1.0;
+    utter.volume = 1.0;
+
+    const voices = window.speechSynthesis.getVoices();
+    const preferThai =
+      voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
+    const preferEnglish =
+      voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
+
+    if (preferThai) utter.voice = preferThai;
+    else if (preferEnglish) utter.voice = preferEnglish;
+    else if (voices[0]) utter.voice = voices[0];
+
+    utter.onstart = () => setIsSpeaking(true);
+    utter.onend = () => setIsSpeaking(false);
+    utter.onerror = () => setIsSpeaking(false);
+
+    window.speechSynthesis.speak(utter);
+  }
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -303,7 +411,7 @@ export default function WhiteboardLesson() {
       setWebTakeaways([]);
 
       const bytes = await file.arrayBuffer();
-      setPdfData(bytes.slice(0)); // avoids detached ArrayBuffer issues
+      setPdfData(bytes.slice(0)); // avoid detached buffer issues
 
       const pdf = await extractPdfText(file);
 
@@ -323,7 +431,6 @@ export default function WhiteboardLesson() {
     const file = e.dataTransfer.files?.[0];
     if (file) await handleFile(file);
   };
-
   const onDragOver: React.DragEventHandler<HTMLDivElement> = (e) => e.preventDefault();
 
   async function startLesson() {
@@ -332,7 +439,8 @@ export default function WhiteboardLesson() {
     if (!hasWebGPU()) {
       setLessonState({
         status: "error",
-        message: "WebGPU not detected. This demo uses in-browser AI (WebGPU). Try Chrome desktop.",
+        message:
+          "WebGPU not detected. This free demo uses in-browser AI (WebGPU). Try Chrome desktop on a supported laptop.",
       });
       return;
     }
@@ -342,13 +450,15 @@ export default function WhiteboardLesson() {
 
     const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
 
+    // map chunkId -> real text for preview
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
 
-    const seedQuery = "summary key concepts definitions statistics findings implications conclusion";
+    const seedQuery =
+      "summary key concepts definitions statistics findings implications conclusion";
 
-    // 1 chunk per page
+    // guarantee at least 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -382,15 +492,22 @@ export default function WhiteboardLesson() {
 
     const evidence = mergedEvidence.map((c) => ({ chunkId: c.id, page: c.page, text: c.text }));
 
-    const basePrompt = buildLessonPrompt({ explainLevel, evidence, numPages: indexState.numPages });
+    const basePrompt = buildLessonPrompt({
+      explainLevel,
+      evidence,
+      numPages: indexState.numPages,
+    });
 
     const prompt = `
 ${basePrompt}
 
-OUTPUT RULES:
+VERY IMPORTANT OUTPUT RULES:
+- Output MUST be JSON only between markers exactly like:
 JSON_START
 { ...valid JSON... }
 JSON_END
+- Do NOT output placeholders like "string".
+- Do NOT output markdown.
 `.trim();
 
     try {
@@ -405,25 +522,31 @@ JSON_END
       let parsed = safeParseLesson(raw);
 
       if (!parsed) {
-        const r1 = await generateText(modelId, buildJsonRepairPrompt(raw));
-        parsed = safeParseLesson(r1);
+        const repaired1 = await generateText(modelId, buildJsonRepairPrompt(raw));
+        parsed = safeParseLesson(repaired1);
 
         if (!parsed) {
-          const r2 = await generateText(modelId, buildJsonRepairPrompt(r1));
-          parsed = safeParseLesson(r2);
+          const repaired2 = await generateText(modelId, buildJsonRepairPrompt(repaired1));
+          parsed = safeParseLesson(repaired2);
 
           if (!parsed) {
             setLessonState({
               status: "error",
-              message: "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
-              raw: raw + "\n\n----- REPAIR #1 -----\n\n" + r1 + "\n\n----- REPAIR #2 -----\n\n" + r2,
+              message:
+                "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
+              raw:
+                raw +
+                "\n\n----- REPAIR #1 -----\n\n" +
+                repaired1 +
+                "\n\n----- REPAIR #2 -----\n\n" +
+                repaired2,
             });
             return;
           }
         }
       }
 
-      // Fix citations per bullet
+      // re-rank citations per bullet
       const usedChunkIds = new Set<string>();
       const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
@@ -451,17 +574,21 @@ JSON_END
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      // Web takeaways: 1 sentence per bullet (optional)
+      // web takeaways (one sentence per bullet)
       if (useWeb) {
         try {
           setWebStatus("Searching web…");
 
-          const lessonTitle = parsed.title || "Education";
-          const pools = await Promise.all([
-            webSearchPool(lessonTitle),
-            webSearchPool(`${lessonTitle} statistics`),
-            webSearchPool("Artificial intelligence in education"),
-          ]);
+          const lessonTitle = parsed.title || "EdTech AI";
+          const queries = [
+            lessonTitle,
+            `${lessonTitle} statistics`,
+            "Artificial intelligence in education",
+            "Intelligent tutoring system",
+            "Educational technology",
+          ];
+
+          const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
 
           const mergedWeb: WebResult[] = [];
           const seenUrls = new Set<string>();
@@ -474,7 +601,6 @@ JSON_END
             }
           }
 
-          // best pick per bullet
           const picks = parsed.bullets
             .map((b, i) => {
               const ranked = [...mergedWeb]
@@ -487,34 +613,59 @@ JSON_END
 
               return {
                 bulletIndex: i,
+                source: String(top.source || "web"),
                 title: String(top.title || "").trim(),
                 snippet: String(top.snippet || "").slice(0, 320),
                 url: String(top.url || "").trim(),
               };
             })
-            .filter(Boolean) as Array<{ bulletIndex: number; title: string; snippet: string; url: string }>;
+            .filter(Boolean) as Array<{
+            bulletIndex: number;
+            source: string;
+            title: string;
+            snippet: string;
+            url: string;
+          }>;
 
-          setWebStatus(`Found ${mergedWeb.length} results — writing web sentences…`);
+          setWebStatus(`Web results: ${mergedWeb.length} — writing takeaways…`);
 
           const webPrompt = buildWebTakeawaysPrompt({
+            lessonTitle,
             bullets: parsed.bullets.map((b) => b.text),
             picks,
           });
 
-          const webRaw = await generateText(modelId, `JSON_START\n${webPrompt}\nJSON_END`);
+          const webPromptWithMarkers = `
+${webPrompt}
+
+Output MUST be between markers:
+JSON_START
+[ ... ]
+JSON_END
+`.trim();
+
+          const webRaw = await generateText(modelId, webPromptWithMarkers);
           let takeaways = safeParseWebTakeaways(webRaw);
 
           if (!takeaways) {
-            // fallback = show snippet as one line
-            takeaways = picks.map((p) => ({
-              bulletIndex: p.bulletIndex,
-              text: p.snippet ? p.snippet.slice(0, 160) : "No snippet available.",
-              url: p.url,
-            }));
+            const repaired = await generateText(modelId, buildWebTakeawaysRepairPrompt(webRaw));
+            takeaways = safeParseWebTakeaways(repaired);
           }
 
-          setWebTakeaways(takeaways);
-          setWebStatus(`Web ready ✅ (${takeaways.length})`);
+          if (!takeaways) {
+            setWebStatus("Web takeaways failed (JSON). Showing snippet fallback.");
+            const fallback: WebTakeaway[] = picks.slice(0, 12).map((p) => ({
+              bulletIndex: p.bulletIndex,
+              text: p.snippet ? p.snippet.slice(0, 180) : "No snippet available.",
+              url: p.url,
+              title: p.title || "Web result",
+              source: p.source || "web",
+            }));
+            setWebTakeaways(fallback);
+          } else {
+            setWebTakeaways(takeaways.slice(0, 12));
+            setWebStatus(`Web takeaways ready ✅ (${takeaways.length})`);
+          }
         } catch (e: any) {
           setWebTakeaways([]);
           setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
@@ -530,7 +681,7 @@ JSON_END
 
       const speech = `${parsed.title}. ${parsed.bullets.map((b) => b.text).join(" ")}`;
       setLastSpoken(speech);
-      speakText(speech);
+      speakTextLocal(speech);
     } catch (e: any) {
       setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
     }
@@ -583,7 +734,7 @@ JSON_END
               background: useWeb ? "var(--primary-grad)" : "#E8F0FE",
               color: useWeb ? "white" : "#2C3E50",
             }}
-            title="Toggle web sentences"
+            title="Toggle web sources (Wikipedia + DuckDuckGo)"
           >
             {useWeb ? "🌐 PDF + Web" : "📄 PDF only"}
           </button>
@@ -602,7 +753,10 @@ JSON_END
 
           <button
             className="video-btn"
-            onClick={() => window.speechSynthesis.cancel()}
+            onClick={() => {
+              window.speechSynthesis.cancel();
+              setIsSpeaking(false);
+            }}
             style={{
               padding: "6px 12px",
               fontSize: "0.8rem",
@@ -615,7 +769,7 @@ JSON_END
 
           <button
             className="video-btn"
-            onClick={() => lastSpoken && speakText(lastSpoken)}
+            onClick={() => lastSpoken && speakTextLocal(lastSpoken)}
             disabled={!lastSpoken}
             style={{
               padding: "6px 12px",
@@ -638,7 +792,7 @@ JSON_END
             className="upload-zone"
             role="button"
             tabIndex={0}
-            onClick={onPickFile}
+            onClick={() => fileInputRef.current?.click()}
             onDrop={onDrop}
             onDragOver={onDragOver}
             title="Click to upload or drag a PDF here"
@@ -650,9 +804,7 @@ JSON_END
             <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
-              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>
-                {indexState.message}
-              </div>
+              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
             )}
           </div>
 
@@ -686,13 +838,16 @@ JSON_END
 
         {/* CENTER */}
         <main className="whiteboard-stage">
-          <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}>
+          {/* ✅ AVATAR TOP-MIDDLE */}
+          <AvatarSpeaker speaking={isSpeaking} />
+
+          <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
             {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
                   <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
-                    PDF bullets + (optional) 1 web sentence under each bullet.
+                    This demo runs AI on your laptop (WebGPU) and teaches from the PDF.
                   </div>
                 </div>
 
@@ -712,35 +867,82 @@ JSON_END
 
                   return (
                     <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-                      {/* Top row: PDF bullet + buttons */}
-                      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      {/* main bullet row */}
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ marginTop: 2 }}>•</div>
 
-                        <div style={{ flex: 1, lineHeight: 1.45 }}>
+                        <div style={{ flex: 1 }}>
+                          {/* PDF sentence */}
                           <div>{b.text}</div>
 
-                          {/* Simple blue web sentence (clean) */}
+                          {/* ✅ WEB sentence (blue box) */}
                           {useWeb && (
                             <div
                               style={{
                                 marginTop: 8,
-                                padding: "10px 12px",
+                                padding: 10,
                                 borderRadius: 12,
-                                border: "1px solid #7DD3FC",
-                                background: "#E0F2FE",
-                                color: "#0F172A",
-                                fontSize: 13,
+                                border: "1px solid #BAE6FD",
+                                background: "#F0F9FF",
+                                display: "flex",
+                                gap: 10,
+                                alignItems: "flex-start",
+                                justifyContent: "space-between",
                               }}
                             >
-                              {w ? w.text : "No web sentence available for this bullet."}
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
+                                  🌐 Web
+                                </div>
+                                <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
+                                  {w ? w.text : "No relevant web result found for this bullet."}
+                                </div>
+                              </div>
+
+                              {/* web link button */}
+                              {w ? (
+                                <a
+                                  href={w.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={w.title}
+                                  style={{
+                                    flexShrink: 0,
+                                    textDecoration: "none",
+                                    border: "1px solid #BAE6FD",
+                                    borderRadius: 10,
+                                    padding: "6px 10px",
+                                    background: "#FFFFFF",
+                                    color: "#2563EB",
+                                    fontWeight: 900,
+                                  }}
+                                >
+                                  🌐
+                                </a>
+                              ) : (
+                                <div
+                                  style={{
+                                    flexShrink: 0,
+                                    border: "1px solid #BAE6FD",
+                                    borderRadius: 10,
+                                    padding: "6px 10px",
+                                    background: "#FFFFFF",
+                                    color: "#94A3B8",
+                                    fontWeight: 900,
+                                  }}
+                                  title="No link"
+                                >
+                                  🌐
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
 
-                        {/* PDF button */}
+                        {/* PDF source button */}
                         <button
                           className="source-pill"
-                          title="Show PDF citations + open preview"
+                          title="Show PDF source + open preview"
                           style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
                           onClick={() => {
                             setOpenBulletIndex(openPdf ? null : i);
@@ -756,31 +958,13 @@ JSON_END
                         >
                           📄
                         </button>
-
-                        {/* Web button (same place, opens link) */}
-                        <button
-                          className="source-pill"
-                          title={useWeb ? (w?.url ? "Open web link" : "No web link yet") : "Turn on Web mode first"}
-                          style={{
-                            border: "none",
-                            padding: "4px 8px",
-                            cursor: useWeb && w?.url ? "pointer" : "not-allowed",
-                            opacity: useWeb ? 1 : 0.45,
-                          }}
-                          disabled={!useWeb || !w?.url}
-                          onClick={() => {
-                            if (w?.url) window.open(w.url, "_blank", "noreferrer");
-                          }}
-                        >
-                          🌐
-                        </button>
                       </div>
 
-                      {/* PDF citations list */}
+                      {/* PDF citations */}
                       {openPdf && b.cites?.length > 0 && (
                         <div
                           style={{
-                            marginTop: 10,
+                            marginTop: 8,
                             marginLeft: 18,
                             padding: 10,
                             border: "1px solid #e5e7eb",
@@ -839,7 +1023,9 @@ JSON_END
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
             <div className="quote-box">
-              <em style={{ color: "#64748B" }}>📄 shows PDF evidence. 🌐 opens the best web link.</em>
+              <em style={{ color: "#64748B" }}>
+                Click 📄 next to a bullet, then click a citation to open PDF preview with highlight.
+              </em>
             </div>
 
             {lessonState.status === "error" && lessonState.raw && (
@@ -852,6 +1038,7 @@ JSON_END
         </aside>
       </div>
 
+      {/* PDF Preview Modal */}
       <PdfCitationPreview
         open={!!preview}
         onClose={() => setPreview(null)}
