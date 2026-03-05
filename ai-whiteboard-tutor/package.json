@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@netlify/functions": "^2.8.2",
     "@mlc-ai/web-llm": "^0.2.63",
     "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
