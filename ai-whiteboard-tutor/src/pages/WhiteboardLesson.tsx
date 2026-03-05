@@ -451,7 +451,7 @@ export default function WhiteboardLesson() {
       }
 
       setIndexState({ status: "indexing", filename: file.name });
-      setLessonState({ status: "idle" });
+      setLessonState({ status: "ready" });
       setOpenBulletIndex(null);
       setPreview(null);
       setWebStatus("");
@@ -614,11 +614,19 @@ JSON_END
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
+      // ✅ SHOW THE LESSON NOW (so web can’t block lesson rendering)
+     setLessonState({ status: "ready", lesson: parsed, raw });
+     setOpenBulletIndex(null);
+     setPreview(null);
 
       // ✅ Web evidence (filtered + clean)
       if (useWeb) {
-        try {
-          setWebStatus("Searching web…");
+         setWebStatus("Searching web…");
+         setWebTakeaways([]);
+
+      // ✅ run web work in the background (does NOT block the lesson)
+        void (async () => {
+       try {
 
           const lessonTitle = parsed.title || "EdTech AI";
           const queries = [
@@ -684,12 +692,13 @@ JSON_END
           setWebTakeaways([]);
           setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
         }
-      } else {
-        setWebTakeaways([]);
-        setWebStatus("");
-      }
+       })();
+    } else {
+      setWebTakeaways([]);
+      setWebStatus("");
+    }
 
-      setLessonState({ status: "ready", lesson: parsed, raw });
+      
       setOpenBulletIndex(null);
       setPreview(null);
 
@@ -1139,4 +1148,5 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
