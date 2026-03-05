@@ -101,7 +101,7 @@ function safeParseLesson(text: string): Lesson | null {
           const t = String(b?.text ?? "").trim();
           return { text: t, cites: [] as Citation[] }; // ignore model cites; we attach ours
         })
-        .filter((b) => b.text)
+        .filter((b: Bullet) => b.text)
         .slice(0, 12);
 
       if (!bullets.length) continue;
@@ -1139,3 +1139,4 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
