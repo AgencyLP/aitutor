@@ -18,6 +18,8 @@ import PdfCitationPreview from "../components/PdfCitationPreview";
 import { webSearchPool } from "../web/webSearch";
 import type { WebResult } from "../web/wikiSearch";
 
+/* ---------------- Types ---------------- */
+
 type IndexState =
   | { status: "idle" }
   | { status: "indexing"; filename: string }
@@ -55,6 +57,14 @@ type WebTakeaway = {
   source: string;
 };
 
+function isReadyLessonState(
+  s: LessonState
+): s is Extract<LessonState, { status: "ready" }> {
+  return s.status === "ready";
+}
+
+/* ---------------- Helpers: JSON parsing ---------------- */
+
 function extractBetween(text: string, startTag: string, endTag: string) {
   const a = text.indexOf(startTag);
   const b = text.indexOf(endTag);
@@ -62,7 +72,6 @@ function extractBetween(text: string, startTag: string, endTag: string) {
   return text.slice(a + startTag.length, b).trim();
 }
 
-/** ✅ Helps when extractFirstJsonObject grabs a tiny {..} instead of the main one */
 function extractLargestJsonObject(text: string) {
   const s = String(text || "");
   const first = s.indexOf("{");
@@ -71,7 +80,6 @@ function extractLargestJsonObject(text: string) {
   return s.slice(first, last + 1);
 }
 
-/** ✅ Robust parsing: accepts bullets as strings or objects; diagram optional */
 function safeParseLesson(text: string): Lesson | null {
   const marked = extractBetween(text, "JSON_START", "JSON_END");
 
@@ -86,7 +94,7 @@ function safeParseLesson(text: string): Lesson | null {
   for (const candidateRaw of candidates) {
     const candidate = String(candidateRaw)
       .trim()
-      .replace(/[\u0000-\u001F\u007F]/g, ""); // strip control chars
+      .replace(/[\u0000-\u001F\u007F]/g, "");
 
     try {
       const obj = JSON.parse(candidate);
@@ -94,17 +102,17 @@ function safeParseLesson(text: string): Lesson | null {
       const rawTitle = typeof obj?.title === "string" ? obj.title : "";
       const title = String(rawTitle || "Lesson").trim();
 
-      const rawBullets = Array.isArray(obj?.bullets) ? obj.bullets : [];
-      const bullets: Bullet[] = rawBullets
-        .map((b: any) => {
-          if (typeof b === "string") return { text: b.trim(), cites: [] as Citation[] };
-          const t = String(b?.text ?? "").trim();
-          return { text: t, cites: [] as Citation[] }; // ignore model cites; we attach ours
+      const rawBullets: unknown[] = Array.isArray(obj?.bullets) ? obj.bullets : [];
+      const mappedBullets: Bullet[] = rawBullets
+        .map((x: unknown): Bullet => {
+          if (typeof x === "string") return { text: x.trim(), cites: [] };
+          const t = String((x as any)?.text ?? "").trim();
+          return { text: t, cites: [] };
         })
-        .filter((b: Bullet) => b.text)
+        .filter((b: Bullet) => Boolean(b.text))
         .slice(0, 12);
 
-      if (!bullets.length) continue;
+      if (!mappedBullets.length) continue;
 
       const diagramType: Diagram["type"] =
         obj?.diagram?.type === "flowchart" || obj?.diagram?.type === "timeline"
@@ -116,55 +124,50 @@ function safeParseLesson(text: string): Lesson | null {
 
       if (obj?.diagram && typeof obj.diagram === "object") {
         if (Array.isArray(obj.diagram.nodes)) {
-          nodes = obj.diagram.nodes
-            .map((n: any, i: number) => ({
-              id: String(n?.id ?? `n${i + 1}`),
-              label: String(n?.label ?? "").trim(),
+          nodes = (obj.diagram.nodes as unknown[])
+            .map((n: unknown, i: number) => ({
+              id: String((n as any)?.id ?? `n${i + 1}`),
+              label: String((n as any)?.label ?? "").trim(),
             }))
-            .filter((n: any) => n.label)
+            .filter((n: { id: string; label: string }) => Boolean(n.label))
             .slice(0, 8);
         }
         if (Array.isArray(obj.diagram.edges)) {
-          edges = obj.diagram.edges
-            .map((e: any) => ({
-              from: String(e?.from ?? ""),
-              to: String(e?.to ?? ""),
-              label: e?.label ? String(e.label) : "",
+          edges = (obj.diagram.edges as unknown[])
+            .map((e: unknown) => ({
+              from: String((e as any)?.from ?? ""),
+              to: String((e as any)?.to ?? ""),
+              label: (e as any)?.label ? String((e as any).label) : "",
             }))
-            .filter((e: any) => e.from && e.to)
+            .filter((e: { from: string; to: string; label?: string }) => Boolean(e.from && e.to))
             .slice(0, 10);
         }
       }
 
-      // if diagram missing/empty, synthesize a simple concept map from bullets
       if (!nodes.length) {
-        const top = bullets[0]?.text ?? title;
-        const others = bullets.slice(1, 7).map((b, i) => ({
+        const top = mappedBullets[0]?.text ?? title;
+        const others = mappedBullets.slice(1, 7).map((b: Bullet, i: number) => ({
           id: `n${i + 2}`,
           label: b.text.length > 40 ? b.text.slice(0, 40) + "…" : b.text,
         }));
-        nodes = [
-          { id: "n1", label: top.length > 40 ? top.slice(0, 40) + "…" : top },
-          ...others,
-        ].slice(0, 8);
+        nodes = [{ id: "n1", label: top.length > 40 ? top.slice(0, 40) + "…" : top }, ...others].slice(0, 8);
         edges = others.map((n) => ({ from: "n1", to: n.id, label: "" })).slice(0, 10);
       }
 
-      const lesson: Lesson = {
+      return {
         title: title.toLowerCase() === "string" ? "Lesson" : title,
-        bullets,
+        bullets: mappedBullets,
         diagram: { type: diagramType, nodes, edges },
         notes: obj?.notes ? String(obj.notes).trim() : "",
       };
-
-      return lesson;
     } catch {
       // try next candidate
     }
   }
-
   return null;
 }
+
+/* ---------------- Helpers: Web evidence (short + clean) ---------------- */
 
 function tokenize(s: string) {
   return (s || "")
@@ -185,23 +188,21 @@ function scoreBulletToWeb(bulletText: string, r: WebResult) {
 }
 
 function cleanOneLine(s: string) {
-  return (s || "")
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function isQuestiony(text: string) {
   const t = cleanOneLine(text).toLowerCase();
   if (!t) return false;
   if (t.includes("?")) return true;
-  if (t.startsWith("what is ")) return true;
-  if (t.startsWith("what are ")) return true;
-  if (t.startsWith("how to ")) return true;
-  if (t.startsWith("why ")) return true;
-  if (t.startsWith("when ")) return true;
-  if (t.startsWith("where ")) return true;
-  return false;
+  return (
+    t.startsWith("what is ") ||
+    t.startsWith("what are ") ||
+    t.startsWith("how to ") ||
+    t.startsWith("why ") ||
+    t.startsWith("when ") ||
+    t.startsWith("where ")
+  );
 }
 
 function firstCleanSentence(text: string) {
@@ -209,8 +210,7 @@ function firstCleanSentence(text: string) {
   if (!s) return "";
   const m = s.match(/^(.{25,}?[.!?])\s/);
   if (m?.[1]) return m[1].trim();
-  const dashCut = s.split(/ — | - /)[0].trim();
-  return dashCut || s;
+  return s.split(/ — | - /)[0].trim() || s;
 }
 
 function trimEndJunk(text: string) {
@@ -220,7 +220,6 @@ function trimEndJunk(text: string) {
   return t;
 }
 
-/** ✅ Web evidence line: Simple shorter, Normal longer, clean, non-questiony */
 function toWebEvidenceLine(r: WebResult, explainLevel: "simple" | "normal") {
   const title = cleanOneLine(String(r?.title ?? ""));
   const snippet = cleanOneLine(String(r?.snippet ?? ""));
@@ -235,8 +234,7 @@ function toWebEvidenceLine(r: WebResult, explainLevel: "simple" | "normal") {
     let cut = base.slice(0, maxLen).trim();
     const lastSpace = cut.lastIndexOf(" ");
     if (lastSpace > 60) cut = cut.slice(0, lastSpace).trim();
-    cut = trimEndJunk(cut);
-    return cut + "…";
+    return trimEndJunk(cut) + "…";
   }
 
   return base || "Open source for supporting context.";
@@ -249,7 +247,12 @@ function formatSourceLabel(source: string) {
   return "Web";
 }
 
-// ---------------- PDF quote/highlight matching ----------------
+/* ---------------- Helpers: PDF quote/highlight ---------------- */
+
+function snippetFromChunkText(chunkText: string) {
+  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
+  return clean ? clean.slice(0, 220) : "";
+}
 
 function normalizeForFind(s: string) {
   return (s || "")
@@ -261,19 +264,6 @@ function normalizeForFind(s: string) {
     .trim();
 }
 
-/** ✅ Fallback quote from chunk */
-function snippetFromChunkText(chunkText: string) {
-  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  return clean.slice(0, 220);
-}
-
-/**
- * Choose a quote that:
- * - comes from the chunk
- * - actually appears in the page text
- * - tends to be unique (longer in normal)
- */
 function chooseHighlightPhrase(params: {
   chunkText: string;
   pageText: string;
@@ -289,20 +279,12 @@ function chooseHighlightPhrase(params: {
   const targetChars = params.explainLevel === "simple" ? 80 : 140;
   const step = 40;
   const starts = [0, Math.floor(chunkN.length * 0.25), Math.floor(chunkN.length * 0.5)];
-
   const originalClean = cleanOneLine(params.chunkText);
 
   for (const start0 of starts) {
-    for (
-      let start = start0;
-      start < Math.min(chunkN.length - 40, start0 + 260);
-      start += step
-    ) {
-      const candidate = chunkN
-        .slice(start, Math.min(chunkN.length, start + targetChars))
-        .trim();
+    for (let start = start0; start < Math.min(chunkN.length - 40, start0 + 260); start += step) {
+      const candidate = chunkN.slice(start, Math.min(chunkN.length, start + targetChars)).trim();
       if (candidate.length < 50) continue;
-
       if (pageN.indexOf(candidate) !== -1) {
         const originalCandidate = originalClean
           .slice(start, Math.min(originalClean.length, start + targetChars))
@@ -316,7 +298,8 @@ function chooseHighlightPhrase(params: {
   return trimEndJunk(firstCleanSentence(chunk)) || "";
 }
 
-/** ✅ Free mini-avatar (no model) that animates while speaking */
+/* ---------------- UI: Avatar ---------------- */
+
 function AvatarSpeaker({ speaking }: { speaking: boolean }) {
   const [mouthOpen, setMouthOpen] = useState(false);
 
@@ -386,6 +369,8 @@ function AvatarSpeaker({ speaking }: { speaking: boolean }) {
   );
 }
 
+/* ---------------- Component ---------------- */
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -410,6 +395,8 @@ export default function WhiteboardLesson() {
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
+  const readyLesson = isReadyLessonState(lessonState) ? lessonState.lesson : null;
+
   function speakTextLocal(text: string) {
     if (!("speechSynthesis" in window)) return;
 
@@ -417,9 +404,6 @@ export default function WhiteboardLesson() {
     setIsSpeaking(false);
 
     const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = 1.0;
-    utter.pitch = 1.0;
-    utter.volume = 1.0;
 
     const voices = window.speechSynthesis.getVoices();
     const preferThai = voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
@@ -468,8 +452,8 @@ export default function WhiteboardLesson() {
         numPages: pdf.numPages,
         pdf,
       });
-    } catch (e: any) {
-      setIndexState({ status: "error", message: e?.message ?? "Failed to read PDF." });
+    } catch (e: unknown) {
+      setIndexState({ status: "error", message: (e as any)?.message ?? "Failed to read PDF." });
     }
   };
 
@@ -497,14 +481,12 @@ export default function WhiteboardLesson() {
 
     const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
 
-    // map chunkId -> real text for preview
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
 
     const seedQuery = "summary key concepts definitions statistics findings implications conclusion";
 
-    // guarantee at least 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -559,7 +541,7 @@ JSON_END
     try {
       setLessonState({ status: "loadingModel", message: "Loading model…" });
 
-      const raw = await generateText(modelId, prompt, (msg) => {
+      const raw = await generateText(modelId, prompt, (msg: string) => {
         setLessonState({ status: "loadingModel", message: msg });
       });
 
@@ -578,7 +560,8 @@ JSON_END
           if (!parsed) {
             setLessonState({
               status: "error",
-              message: "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
+              message:
+                "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
               raw: raw + "\n\n----- REPAIR #1 -----\n\n" + repaired1 + "\n\n----- REPAIR #2 -----\n\n" + repaired2,
             });
             return;
@@ -586,9 +569,9 @@ JSON_END
         }
       }
 
-      // ✅ Attach PDF citations ourselves (quote == highlight phrase)
+      // Attach citations ourselves
       const usedChunkIds = new Set<string>();
-      const fixedBullets = parsed.bullets.map((b) => {
+      const fixedBullets: Bullet[] = parsed.bullets.map((b: Bullet) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
 
         const picked: typeof candidates = [];
@@ -602,11 +585,10 @@ JSON_END
         if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
         if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
 
-        const cites = picked.map((c) => {
+        const cites: Citation[] = picked.map((c) => {
           const pageText = indexState.pdf.pages?.[c.page - 1]?.text ?? "";
           const phrase =
             chooseHighlightPhrase({ chunkText: c.text, pageText, explainLevel }) || snippetFromChunkText(c.text);
-
           return { page: c.page, chunkId: c.id, quote: phrase };
         });
 
@@ -614,99 +596,98 @@ JSON_END
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
-      // ✅ SHOW THE LESSON NOW (so web can’t block lesson rendering)
-     setLessonState({ status: "ready", lesson: parsed, raw });
-     setOpenBulletIndex(null);
-     setPreview(null);
 
-      if (useWeb) {
-  setWebStatus("Searching web…");
-  setWebTakeaways([]);
-
-  void (async () => {
-    try {
-      const lessonTitle = parsed.title || "EdTech AI";
-      const queries = [
-        lessonTitle,
-        `${lessonTitle} statistics`,
-        "Artificial intelligence in education",
-        "Intelligent tutoring system",
-        "Educational technology",
-      ];
-
-      const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
-
-      const mergedWeb: WebResult[] = [];
-      const seenUrls = new Set<string>();
-      for (const arr of pools) {
-        for (const r of arr) {
-          if (!r?.url) continue;
-          if (seenUrls.has(r.url)) continue;
-          seenUrls.add(r.url);
-          mergedWeb.push(r);
-        }
-      }
-
-      const cleanedWeb = mergedWeb.filter((r) => {
-        const t = cleanOneLine(r.title || "");
-        const s = cleanOneLine(r.snippet || "");
-        if (!t || !r.url) return false;
-        if (isQuestiony(t) && isQuestiony(s)) return false;
-        if (s.length < 35 && isQuestiony(t)) return false;
-        return true;
-      });
-
-      const takeaways: WebTakeaway[] = parsed.bullets
-        .map((b, i) => {
-          const ranked = [...cleanedWeb]
-            .map((r) => {
-              const overlap = scoreBulletToWeb(b.text, r);
-              const isWiki = String((r as any).source || "").toLowerCase() === "wikipedia";
-              const qPenalty = isQuestiony(r.title || "") ? 2 : 0;
-              const lenBonus = Math.min(
-                3,
-                Math.floor((cleanOneLine(r.snippet || "").length || 0) / 80)
-              );
-              const score = overlap + (isWiki ? 2 : 0) + lenBonus - qPenalty;
-              return { r, score };
-            })
-            .sort((x, y) => y.score - x.score)
-            .map((x) => x.r);
-
-          const top = ranked[0];
-          if (!top) return null;
-
-          return {
-            bulletIndex: i,
-            text: toWebEvidenceLine(top, explainLevel),
-            url: cleanOneLine(String(top.url || "")),
-            title: cleanOneLine(String(top.title || "Web source")),
-            source: cleanOneLine(String((top as any).source || "web")),
-          };
-        })
-        .filter(Boolean) as WebTakeaway[];
-
-      setWebTakeaways(takeaways.slice(0, 12));
-      setWebStatus(`Web evidence ready ✅ (${takeaways.length})`);
-    } catch (e: any) {
-      setWebTakeaways([]);
-      setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
-    }
-  })();
-} else {
-  setWebTakeaways([]);
-  setWebStatus("");
-}
-
-      
+      // Show lesson immediately
+      setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
       setPreview(null);
+
+      // Web evidence runs after (non-blocking)
+      if (useWeb) {
+        setWebStatus("Searching web…");
+        setWebTakeaways([]);
+
+        void (async () => {
+          try {
+            const lessonTitle = parsed.title || "EdTech AI";
+            const queries = [
+              lessonTitle,
+              `${lessonTitle} statistics`,
+              "Artificial intelligence in education",
+              "Intelligent tutoring system",
+              "Educational technology",
+            ];
+
+            const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
+
+            const mergedWeb: WebResult[] = [];
+            const seenUrls2 = new Set<string>();
+            for (const arr of pools) {
+              for (const r of arr) {
+                if (!r?.url) continue;
+                if (seenUrls2.has(r.url)) continue;
+                seenUrls2.add(r.url);
+                mergedWeb.push(r);
+              }
+            }
+
+            const cleanedWeb = mergedWeb.filter((r) => {
+              const t = cleanOneLine(r.title || "");
+              const s = cleanOneLine(r.snippet || "");
+              if (!t || !r.url) return false;
+              if (isQuestiony(t) && isQuestiony(s)) return false;
+              if (s.length < 35 && isQuestiony(t)) return false;
+              return true;
+            });
+
+            const takeaways: WebTakeaway[] = parsed.bullets
+              .map((b: Bullet, i: number) => {
+                const ranked = [...cleanedWeb]
+                  .map((r) => {
+                    const overlap = scoreBulletToWeb(b.text, r);
+                    const isWiki =
+                      String((r as any).source || "").toLowerCase() === "wikipedia";
+                    const qPenalty = isQuestiony(r.title || "") ? 2 : 0;
+                    const lenBonus = Math.min(
+                      3,
+                      Math.floor((cleanOneLine(r.snippet || "").length || 0) / 80)
+                    );
+                    const score = overlap + (isWiki ? 2 : 0) + lenBonus - qPenalty;
+                    return { r, score };
+                  })
+                  .sort((x, y) => y.score - x.score)
+                  .map((x) => x.r);
+
+                const top = ranked[0];
+                if (!top) return null;
+
+                return {
+                  bulletIndex: i,
+                  text: toWebEvidenceLine(top, explainLevel),
+                  url: cleanOneLine(String(top.url || "")),
+                  title: cleanOneLine(String(top.title || "Web source")),
+                  source: cleanOneLine(String((top as any).source || "web")),
+                };
+              })
+              .filter(Boolean) as WebTakeaway[];
+
+            setWebTakeaways(takeaways.slice(0, 12));
+            setWebStatus(`Web evidence ready ✅ (${takeaways.length})`);
+          } catch (e: unknown) {
+            setWebTakeaways([]);
+            setWebStatus(`Web failed: ${(e as any)?.message ?? "Unknown error"}`);
+          }
+        })();
+      } else {
+        setWebTakeaways([]);
+        setWebStatus("");
+      }
 
       const speech = `${parsed.title}. ${parsed.bullets.map((x) => x.text).join(" ")}`;
       setLastSpoken(speech);
       speakTextLocal(speech);
-    } catch (e: any) {
-      setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
+    } catch (e: unknown) {
+      setLessonState({ status: "error", message: (e as any)?.message ?? "Failed to generate lesson." });
     }
   }
 
@@ -821,13 +802,17 @@ JSON_END
             title="Click to upload or drag a PDF here"
           >
             <p style={{ margin: 0 }}>
-              {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
+              {indexState.status === "indexed"
+                ? `PDF: ${indexState.filename}`
+                : "Click or drag PDF here"}
             </p>
 
             <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
-              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
+              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>
+                {indexState.message}
+              </div>
             )}
           </div>
 
@@ -864,26 +849,30 @@ JSON_END
           <AvatarSpeaker speaking={isSpeaking} />
 
           <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
-            {lessonState.status !== "ready" ? (
+            {!readyLesson ? (
               <>
                 <div className="lesson-chunk">
-                  <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
+                  <strong>
+                    {indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}
+                  </strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
                     This demo runs AI on your laptop (WebGPU) and teaches from the PDF.
                   </div>
                 </div>
 
                 <div className="diagram-box">
-                  {indexState.status === "indexed" ? "[ Waiting to generate lesson… ]" : "[ Whiteboard area — waiting for PDF ]"}
+                  {indexState.status === "indexed"
+                    ? "[ Waiting to generate lesson… ]"
+                    : "[ Whiteboard area — waiting for PDF ]"}
                 </div>
               </>
             ) : (
               <>
                 <div className="lesson-chunk">
-                  <strong>{lessonState.lesson.title}</strong>
+                  <strong>{readyLesson.title}</strong>
                 </div>
 
-                lessonState.lesson.bullets.map((b: Bullet, i: number) => {
+                {readyLesson.bullets.map((b: Bullet, i: number) => {
                   const openPdf = openBulletIndex === i;
                   const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : undefined;
 
@@ -911,7 +900,7 @@ JSON_END
                             >
                               <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
-                                  🌐 Web
+                                  🌐 Web{" "}
                                   {w?.source ? (
                                     <span style={{ marginLeft: 8, opacity: 0.7 }}>
                                       {formatSourceLabel(w.source)}
@@ -989,7 +978,7 @@ JSON_END
                             color: "#334155",
                           }}
                         >
-                          b.cites.map((c: Citation, idx: number) => (
+                          {b.cites.map((c: Citation, idx: number) => (
                             <div
                               key={idx}
                               style={{
@@ -1016,11 +1005,11 @@ JSON_END
                   );
                 })}
 
-                <DiagramPanel diagram={lessonState.lesson.diagram} />
+                <DiagramPanel diagram={readyLesson.diagram} />
 
-                {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
+                {readyLesson.notes && readyLesson.notes !== "string" && (
                   <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
-                    Note: {lessonState.lesson.notes}
+                    Note: {readyLesson.notes}
                   </div>
                 )}
               </>
@@ -1059,6 +1048,8 @@ JSON_END
     </>
   );
 }
+
+/* ---------------- Diagram panel ---------------- */
 
 function DiagramPanel({ diagram }: { diagram: Diagram }) {
   const width = 800;
@@ -1148,7 +1139,3 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
-
-
-
-
