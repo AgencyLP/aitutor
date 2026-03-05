@@ -63,6 +63,9 @@ type Bones = {
 
 function Model({ speaking }: { speaking: boolean }) {
   const gltf = useGLTF("/avatar/tutor.glb");
+  useEffect(() => {
+  console.log("TutorAvatar3D speaking =", speaking);
+  }, [speaking]);
   const [frameVersion, setFrameVersion] = useState(0);
 
   const bones = useMemo<Bones>(() => {
