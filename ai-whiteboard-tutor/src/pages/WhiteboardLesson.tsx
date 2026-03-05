@@ -44,7 +44,7 @@ type LessonState =
   | { status: "idle" }
   | { status: "loadingModel"; message: string }
   | { status: "generating"; message: string }
-  | { status: "ready"; lesson: Lesson; raw: string }
+  | { status: "idle"; lesson: Lesson; raw: string }
   | { status: "error"; message: string; raw?: string };
 
 type WebTakeaway = {
@@ -619,84 +619,84 @@ JSON_END
      setOpenBulletIndex(null);
      setPreview(null);
 
-      // ✅ Web evidence (filtered + clean)
       if (useWeb) {
-         setWebStatus("Searching web…");
-         setWebTakeaways([]);
+  setWebStatus("Searching web…");
+  setWebTakeaways([]);
 
-      // ✅ run web work in the background (does NOT block the lesson)
-        void (async () => {
-       try {
+  void (async () => {
+    try {
+      const lessonTitle = parsed.title || "EdTech AI";
+      const queries = [
+        lessonTitle,
+        `${lessonTitle} statistics`,
+        "Artificial intelligence in education",
+        "Intelligent tutoring system",
+        "Educational technology",
+      ];
 
-          const lessonTitle = parsed.title || "EdTech AI";
-          const queries = [
-            lessonTitle,
-            `${lessonTitle} statistics`,
-            "Artificial intelligence in education",
-            "Intelligent tutoring system",
-            "Educational technology",
-          ];
+      const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
 
-          const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
-
-          const mergedWeb: WebResult[] = [];
-          const seenUrls = new Set<string>();
-          for (const arr of pools) {
-            for (const r of arr) {
-              if (!r?.url) continue;
-              if (seenUrls.has(r.url)) continue;
-              seenUrls.add(r.url);
-              mergedWeb.push(r);
-            }
-          }
-
-          const cleanedWeb = mergedWeb.filter((r) => {
-            const t = cleanOneLine(r.title || "");
-            const s = cleanOneLine(r.snippet || "");
-            if (!t || !r.url) return false;
-            if (isQuestiony(t) && isQuestiony(s)) return false;
-            if (s.length < 35 && isQuestiony(t)) return false;
-            return true;
-          });
-
-          const takeaways: WebTakeaway[] = parsed.bullets
-            .map((b, i) => {
-              const ranked = [...cleanedWeb]
-                .map((r) => {
-                  const overlap = scoreBulletToWeb(b.text, r);
-                  const isWiki = String((r as any).source || "").toLowerCase() === "wikipedia";
-                  const qPenalty = isQuestiony(r.title || "") ? 2 : 0;
-                  const lenBonus = Math.min(3, Math.floor((cleanOneLine(r.snippet || "").length || 0) / 80));
-                  const score = overlap + (isWiki ? 2 : 0) + lenBonus - qPenalty;
-                  return { r, score };
-                })
-                .sort((x, y) => y.score - x.score)
-                .map((x) => x.r);
-
-              const top = ranked[0];
-              if (!top) return null;
-
-              return {
-                bulletIndex: i,
-                text: toWebEvidenceLine(top, explainLevel),
-                url: cleanOneLine(String(top.url || "")),
-                title: cleanOneLine(String(top.title || "Web source")),
-                source: cleanOneLine(String((top as any).source || "web")),
-              };
-            })
-            .filter(Boolean) as WebTakeaway[];
-
-          setWebTakeaways(takeaways.slice(0, 12));
-          setWebStatus(`Web evidence ready ✅ (${takeaways.length})`);
-        } catch (e: any) {
-          setWebTakeaways([]);
-          setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
+      const mergedWeb: WebResult[] = [];
+      const seenUrls = new Set<string>();
+      for (const arr of pools) {
+        for (const r of arr) {
+          if (!r?.url) continue;
+          if (seenUrls.has(r.url)) continue;
+          seenUrls.add(r.url);
+          mergedWeb.push(r);
         }
-       })();
-    } else {
+      }
+
+      const cleanedWeb = mergedWeb.filter((r) => {
+        const t = cleanOneLine(r.title || "");
+        const s = cleanOneLine(r.snippet || "");
+        if (!t || !r.url) return false;
+        if (isQuestiony(t) && isQuestiony(s)) return false;
+        if (s.length < 35 && isQuestiony(t)) return false;
+        return true;
+      });
+
+      const takeaways: WebTakeaway[] = parsed.bullets
+        .map((b, i) => {
+          const ranked = [...cleanedWeb]
+            .map((r) => {
+              const overlap = scoreBulletToWeb(b.text, r);
+              const isWiki = String((r as any).source || "").toLowerCase() === "wikipedia";
+              const qPenalty = isQuestiony(r.title || "") ? 2 : 0;
+              const lenBonus = Math.min(
+                3,
+                Math.floor((cleanOneLine(r.snippet || "").length || 0) / 80)
+              );
+              const score = overlap + (isWiki ? 2 : 0) + lenBonus - qPenalty;
+              return { r, score };
+            })
+            .sort((x, y) => y.score - x.score)
+            .map((x) => x.r);
+
+          const top = ranked[0];
+          if (!top) return null;
+
+          return {
+            bulletIndex: i,
+            text: toWebEvidenceLine(top, explainLevel),
+            url: cleanOneLine(String(top.url || "")),
+            title: cleanOneLine(String(top.title || "Web source")),
+            source: cleanOneLine(String((top as any).source || "web")),
+          };
+        })
+        .filter(Boolean) as WebTakeaway[];
+
+      setWebTakeaways(takeaways.slice(0, 12));
+      setWebStatus(`Web evidence ready ✅ (${takeaways.length})`);
+    } catch (e: any) {
       setWebTakeaways([]);
-      setWebStatus("");
+      setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
     }
+  })();
+} else {
+  setWebTakeaways([]);
+  setWebStatus("");
+}
 
       
       setOpenBulletIndex(null);
@@ -1148,5 +1148,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
