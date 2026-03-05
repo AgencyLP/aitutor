@@ -36,8 +36,9 @@ function AutoFrame({
 
     // Fit to HEIGHT
     let distance = size.y / (2 * Math.tan(fov / 2));
-    distance *= 1.28; // your "perfect" padding
+    distance *= 1.28; // your “perfect” padding
 
+    // Aim slightly low so shoes fit
     const aim = center.clone();
     aim.y = center.y + size.y * 0.10;
 
@@ -55,8 +56,6 @@ type Bones = {
   rightShoulder: THREE.Object3D | null;
   leftArm: THREE.Object3D | null;
   rightArm: THREE.Object3D | null;
-  jaw: THREE.Object3D | null;
-  mouthTargets: THREE.Object3D[]; // ✅ all mouth-related meshes/objects
 };
 
 function Model({ speaking }: { speaking: boolean }) {
@@ -72,28 +71,45 @@ function Model({ speaking }: { speaking: boolean }) {
     const leftArm: THREE.Object3D | null = findByIncludes(root, "mixamorigleftarm_09");
     const rightArm: THREE.Object3D | null = findByIncludes(root, "mixamorigrightarm_033");
 
-    const jaw: THREE.Object3D | null =
-      findByIncludes(root, "mixamorigjaw") || findByIncludes(root, "jaw");
-
-    // ✅ Collect any object that looks mouth-related
-    const mouthTargets: THREE.Object3D[] = [];
-    root.traverse((o: THREE.Object3D) => {
-      const n = (o.name || "").toLowerCase();
-      if (
-        n.includes("mouth") ||
-        n.includes("teeth") ||
-        n.includes("lip") ||
-        n.includes("tongue")
-      ) {
-        mouthTargets.push(o);
-      }
-    });
-
-    // Debug (safe): see in console on Netlify if we found anything
-    console.log("Mouth targets found:", mouthTargets.map((m) => m.name));
-
-    return { head, leftShoulder, rightShoulder, leftArm, rightArm, jaw, mouthTargets };
+    return { head, leftShoulder, rightShoulder, leftArm, rightArm };
   }, [gltf.scene]);
+
+  // ✅ Create a mouth overlay mesh once
+  const mouthOverlay = useMemo(() => {
+    const geom = new THREE.PlaneGeometry(0.10, 0.05);
+    const mat = new THREE.MeshStandardMaterial({
+      color: "#0f172a",
+      roughness: 0.35,
+      metalness: 0.0,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.name = "TutorMouthOverlay";
+    return mesh;
+  }, []);
+
+  // ✅ Attach mouth overlay to head (one-time)
+  useEffect(() => {
+    const { head } = bones;
+    if (!head) return;
+
+    // Attach to head so it follows head movement
+    head.add(mouthOverlay);
+
+    // Position relative to head:
+    // These numbers are “generic” — we’ll tweak if needed.
+    mouthOverlay.position.set(0, -0.11, 0.11);
+    mouthOverlay.rotation.set(0, 0, 0);
+    mouthOverlay.scale.set(1, 1, 1);
+
+    gltf.scene.updateMatrixWorld(true);
+
+    return () => {
+      head.remove(mouthOverlay);
+    };
+  }, [bones, gltf.scene, mouthOverlay]);
 
   // Pose fix (stable): store rest pose and apply offsets
   useEffect(() => {
@@ -121,9 +137,11 @@ function Model({ speaking }: { speaking: boolean }) {
 
     if (head) head.rotation.x = -0.12;
 
+    // Your working shoulder offsets
     applyFromRest(leftShoulder, 0.05, 0.35, 0);
     applyFromRest(rightShoulder, 0.05, -0.35, 0);
 
+    // Your working upper arm offsets
     applyFromRest(leftArm, 0.55, 0.25, -0.12);
     applyFromRest(rightArm, 0.55, -0.25, 0.12);
 
@@ -131,61 +149,25 @@ function Model({ speaking }: { speaking: boolean }) {
     setFrameVersion((v) => v + 1);
   }, [bones, gltf.scene]);
 
-  // ✅ Talking: jaw if available, otherwise animate ALL mouth targets
+  // ✅ Mouth animation (always visible)
   useEffect(() => {
-    const { jaw, mouthTargets } = bones;
-    if (!jaw && mouthTargets.length === 0) return;
-
-    // Store base transforms once
-    for (const m of mouthTargets) {
-      const anyM = m as any;
-      if (!anyM.__base) {
-        anyM.__base = {
-          sx: m.scale.x,
-          sy: m.scale.y,
-          sz: m.scale.z,
-          px: m.position.x,
-          py: m.position.y,
-          pz: m.position.z,
-        };
-      }
-    }
-
     let t = 0;
     const id = window.setInterval(() => {
-      const open = speaking ? 0.12 + 0.10 * Math.sin(t) : 0;
+      // open goes 0 -> ~0.20 while speaking
+      const open = speaking ? 0.10 + 0.10 * Math.sin(t) : 0;
 
-      if (jaw) {
-        jaw.rotation.x = open;
-      }
+      // Scale Y = “open mouth”, scale X slightly for expression
+      mouthOverlay.scale.y = 1 + open * 4.0;
+      mouthOverlay.scale.x = 1 + open * 0.6;
 
-      // Stronger animation so it's visible
-      for (const m of mouthTargets) {
-        const base = (m as any).__base as {
-          sx: number; sy: number; sz: number;
-          px: number; py: number; pz: number;
-        };
-
-        // Scale "open" and nudge slightly so it is noticeable
-        m.scale.set(base.sx, base.sy * (1 + open * 5.5), base.sz * (1 + open * 1.2));
-        m.position.set(base.px, base.py - open * 0.015, base.pz);
-      }
+      // Tiny downward shift when opening
+      mouthOverlay.position.y = -0.11 - open * 0.01;
 
       t += 0.35;
     }, 60);
 
-    return () => {
-      window.clearInterval(id);
-      // Restore
-      for (const m of mouthTargets) {
-        const base = (m as any).__base;
-        if (base) {
-          m.scale.set(base.sx, base.sy, base.sz);
-          m.position.set(base.px, base.py, base.pz);
-        }
-      }
-    };
-  }, [bones, speaking]);
+    return () => window.clearInterval(id);
+  }, [mouthOverlay, speaking]);
 
   return (
     <>
