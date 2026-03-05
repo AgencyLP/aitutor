@@ -96,8 +96,7 @@ function safeParseLesson(text: string): Lesson | null {
                     (c: any) =>
                       Number.isFinite(c.page) &&
                       c.page > 0 &&
-                      c.chunkId &&
-                      c.quote
+                      c.chunkId 
                   )
               : [],
           }))
@@ -136,8 +135,7 @@ function safeParseLesson(text: string): Lesson | null {
     if (!lesson.title || lesson.title.toLowerCase() === "string") return null;
     if (lesson.bullets.length === 0) return null;
     if (lesson.bullets.some((b) => b.text.toLowerCase() === "string")) return null;
-    if (lesson.bullets.every((b) => (b.cites?.length ?? 0) === 0)) return null;
-
+  
     return lesson;
   } catch {
     return null;
@@ -1151,3 +1149,4 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
