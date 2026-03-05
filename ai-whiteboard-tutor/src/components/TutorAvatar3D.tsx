@@ -29,7 +29,6 @@ function AutoFrame({
     box.getCenter(center);
 
     const cam = camera as THREE.PerspectiveCamera;
-
     cam.fov = 38;
     cam.updateProjectionMatrix();
 
@@ -37,9 +36,8 @@ function AutoFrame({
 
     // Fit to HEIGHT
     let distance = size.y / (2 * Math.tan(fov / 2));
-    distance *= 1.28; // your “perfect” padding
+    distance *= 1.28; // your "perfect" padding
 
-    // Aim slightly low so shoes fit
     const aim = center.clone();
     aim.y = center.y + size.y * 0.10;
 
@@ -58,14 +56,11 @@ type Bones = {
   leftArm: THREE.Object3D | null;
   rightArm: THREE.Object3D | null;
   jaw: THREE.Object3D | null;
-  mouthMesh: THREE.Object3D | null;
+  mouthTargets: THREE.Object3D[]; // ✅ all mouth-related meshes/objects
 };
 
 function Model({ speaking }: { speaking: boolean }) {
   const gltf = useGLTF("/avatar/tutor.glb");
-  useEffect(() => {
-  console.log("TutorAvatar3D speaking =", speaking);
-  }, [speaking]);
   const [frameVersion, setFrameVersion] = useState(0);
 
   const bones = useMemo<Bones>(() => {
@@ -80,10 +75,24 @@ function Model({ speaking }: { speaking: boolean }) {
     const jaw: THREE.Object3D | null =
       findByIncludes(root, "mixamorigjaw") || findByIncludes(root, "jaw");
 
-    // From your node list: "mouthinside" exists
-    const mouthMesh: THREE.Object3D | null = findByIncludes(root, "mouthinside");
+    // ✅ Collect any object that looks mouth-related
+    const mouthTargets: THREE.Object3D[] = [];
+    root.traverse((o: THREE.Object3D) => {
+      const n = (o.name || "").toLowerCase();
+      if (
+        n.includes("mouth") ||
+        n.includes("teeth") ||
+        n.includes("lip") ||
+        n.includes("tongue")
+      ) {
+        mouthTargets.push(o);
+      }
+    });
 
-    return { head, leftShoulder, rightShoulder, leftArm, rightArm, jaw, mouthMesh };
+    // Debug (safe): see in console on Netlify if we found anything
+    console.log("Mouth targets found:", mouthTargets.map((m) => m.name));
+
+    return { head, leftShoulder, rightShoulder, leftArm, rightArm, jaw, mouthTargets };
   }, [gltf.scene]);
 
   // Pose fix (stable): store rest pose and apply offsets
@@ -103,12 +112,7 @@ function Model({ speaking }: { speaking: boolean }) {
     storeRest(leftArm);
     storeRest(rightArm);
 
-    const applyFromRest = (
-      b: THREE.Object3D | null,
-      dx: number,
-      dy: number,
-      dz: number
-    ) => {
+    const applyFromRest = (b: THREE.Object3D | null, dx: number, dy: number, dz: number) => {
       if (!b) return;
       const r = (b as any).__restRot as { x: number; y: number; z: number } | undefined;
       if (!r) return;
@@ -117,11 +121,9 @@ function Model({ speaking }: { speaking: boolean }) {
 
     if (head) head.rotation.x = -0.12;
 
-    // Your working shoulder offsets
     applyFromRest(leftShoulder, 0.05, 0.35, 0);
     applyFromRest(rightShoulder, 0.05, -0.35, 0);
 
-    // Your working upper arm offsets
     applyFromRest(leftArm, 0.55, 0.25, -0.12);
     applyFromRest(rightArm, 0.55, -0.25, 0.12);
 
@@ -129,27 +131,44 @@ function Model({ speaking }: { speaking: boolean }) {
     setFrameVersion((v) => v + 1);
   }, [bones, gltf.scene]);
 
-  // ✅ Talking: jaw if available, otherwise animate mouthinside mesh
+  // ✅ Talking: jaw if available, otherwise animate ALL mouth targets
   useEffect(() => {
-    const { jaw, mouthMesh } = bones;
-    if (!jaw && !mouthMesh) return;
+    const { jaw, mouthTargets } = bones;
+    if (!jaw && mouthTargets.length === 0) return;
 
-    // Remember mouth mesh original scale once
-    const mouthAny = mouthMesh as any;
-    if (mouthMesh && !mouthAny.__baseScale) {
-      mouthAny.__baseScale = { x: mouthMesh.scale.x, y: mouthMesh.scale.y, z: mouthMesh.scale.z };
+    // Store base transforms once
+    for (const m of mouthTargets) {
+      const anyM = m as any;
+      if (!anyM.__base) {
+        anyM.__base = {
+          sx: m.scale.x,
+          sy: m.scale.y,
+          sz: m.scale.z,
+          px: m.position.x,
+          py: m.position.y,
+          pz: m.position.z,
+        };
+      }
     }
 
     let t = 0;
     const id = window.setInterval(() => {
-      const open = speaking ? 0.10 + 0.08 * Math.sin(t) : 0;
+      const open = speaking ? 0.12 + 0.10 * Math.sin(t) : 0;
 
       if (jaw) {
         jaw.rotation.x = open;
-      } else if (mouthMesh) {
-        const base = mouthAny.__baseScale as { x: number; y: number; z: number };
-        // scale Y to simulate opening; also tiny Z scale for depth
-        mouthMesh.scale.set(base.x, base.y * (1 + open * 2.8), base.z * (1 + open * 0.6));
+      }
+
+      // Stronger animation so it's visible
+      for (const m of mouthTargets) {
+        const base = (m as any).__base as {
+          sx: number; sy: number; sz: number;
+          px: number; py: number; pz: number;
+        };
+
+        // Scale "open" and nudge slightly so it is noticeable
+        m.scale.set(base.sx, base.sy * (1 + open * 5.5), base.sz * (1 + open * 1.2));
+        m.position.set(base.px, base.py - open * 0.015, base.pz);
       }
 
       t += 0.35;
@@ -157,10 +176,13 @@ function Model({ speaking }: { speaking: boolean }) {
 
     return () => {
       window.clearInterval(id);
-      // restore mouth scale when stopping
-      if (mouthMesh && mouthAny.__baseScale) {
-        const base = mouthAny.__baseScale as { x: number; y: number; z: number };
-        mouthMesh.scale.set(base.x, base.y, base.z);
+      // Restore
+      for (const m of mouthTargets) {
+        const base = (m as any).__base;
+        if (base) {
+          m.scale.set(base.sx, base.sy, base.sz);
+          m.position.set(base.px, base.py, base.pz);
+        }
       }
     };
   }, [bones, speaking]);
