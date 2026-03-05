@@ -174,6 +174,31 @@ function snippetFromChunkText(chunkText: string) {
   return clean.slice(0, 220);
 }
 
+function buildSingleWebTakeawayPrompt(params: {
+  lessonTitle: string;
+  bulletText: string;
+  source: { title: string; snippet: string; url: string; source: string };
+}) {
+  return `
+You are writing ONE "Web Takeaway" sentence for an EdTech AI tutor UI.
+
+RULES:
+- Use ONLY the provided snippet. Do NOT invent facts.
+- Write EXACTLY 1 short sentence that supports/adds context to the bullet.
+- Output MUST be plain text only (no JSON, no quotes, no markdown, no bullet symbols).
+- If snippet is not useful, output exactly: NO_TAKEAWAY
+
+LESSON_TITLE: ${params.lessonTitle}
+
+BULLET: ${params.bulletText}
+
+SOURCE_TITLE: ${params.source.title}
+SOURCE_SNIPPET: ${params.source.snippet}
+SOURCE_URL: ${params.source.url}
+SOURCE_TYPE: ${params.source.source}
+`.trim();
+}
+
 function buildWebTakeawaysPrompt(params: {
   lessonTitle: string;
   bullets: string[];
@@ -573,107 +598,85 @@ JSON_END
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
+// web takeaways (one sentence per bullet)
+if (useWeb) {
+  try {
+    setWebStatus("Searching web…");
 
-      // web takeaways (one sentence per bullet)
-      if (useWeb) {
-        try {
-          setWebStatus("Searching web…");
+    const lessonTitle = parsed.title || "EdTech AI";
+    const queries = [
+      lessonTitle,
+      `${lessonTitle} statistics`,
+      "Artificial intelligence in education",
+      "Intelligent tutoring system",
+      "Educational technology",
+    ];
 
-          const lessonTitle = parsed.title || "EdTech AI";
-          const queries = [
-            lessonTitle,
-            `${lessonTitle} statistics`,
-            "Artificial intelligence in education",
-            "Intelligent tutoring system",
-            "Educational technology",
-          ];
+    const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
 
-          const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
-
-          const mergedWeb: WebResult[] = [];
-          const seenUrls = new Set<string>();
-          for (const arr of pools) {
-            for (const r of arr) {
-              if (!r?.url) continue;
-              if (seenUrls.has(r.url)) continue;
-              seenUrls.add(r.url);
-              mergedWeb.push(r);
-            }
-          }
-
-          const picks = parsed.bullets
-            .map((b, i) => {
-              const ranked = [...mergedWeb]
-                .map((r) => ({ r, s: scoreBulletToWeb(b.text, r) }))
-                .sort((x, y) => y.s - x.s)
-                .map((x) => x.r);
-
-              const top = ranked[0];
-              if (!top) return null;
-
-              return {
-                bulletIndex: i,
-                source: String(top.source || "web"),
-                title: String(top.title || "").trim(),
-                snippet: String(top.snippet || "").slice(0, 320),
-                url: String(top.url || "").trim(),
-              };
-            })
-            .filter(Boolean) as Array<{
-            bulletIndex: number;
-            source: string;
-            title: string;
-            snippet: string;
-            url: string;
-          }>;
-
-          setWebStatus(`Web results: ${mergedWeb.length} — writing takeaways…`);
-
-          const webPrompt = buildWebTakeawaysPrompt({
-            lessonTitle,
-            bullets: parsed.bullets.map((b) => b.text),
-            picks,
-          });
-
-          const webPromptWithMarkers = `
-${webPrompt}
-
-Output MUST be between markers:
-JSON_START
-[ ... ]
-JSON_END
-`.trim();
-
-          const webRaw = await generateText(modelId, webPromptWithMarkers);
-          let takeaways = safeParseWebTakeaways(webRaw);
-
-          if (!takeaways) {
-            const repaired = await generateText(modelId, buildWebTakeawaysRepairPrompt(webRaw));
-            takeaways = safeParseWebTakeaways(repaired);
-          }
-
-          if (!takeaways) {
-            setWebStatus("Web takeaways failed (JSON). Showing snippet fallback.");
-            const fallback: WebTakeaway[] = picks.slice(0, 12).map((p) => ({
-              bulletIndex: p.bulletIndex,
-              text: p.snippet ? p.snippet.slice(0, 180) : "No snippet available.",
-              url: p.url,
-              title: p.title || "Web result",
-              source: p.source || "web",
-            }));
-            setWebTakeaways(fallback);
-          } else {
-            setWebTakeaways(takeaways.slice(0, 12));
-            setWebStatus(`Web takeaways ready ✅ (${takeaways.length})`);
-          }
-        } catch (e: any) {
-          setWebTakeaways([]);
-          setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
-        }
-      } else {
-        setWebTakeaways([]);
-        setWebStatus("");
+    const mergedWeb: WebResult[] = [];
+    const seenUrls = new Set<string>();
+    for (const arr of pools) {
+      for (const r of arr) {
+        if (!r?.url) continue;
+        if (seenUrls.has(r.url)) continue;
+        seenUrls.add(r.url);
+        mergedWeb.push(r);
       }
+    }
+
+    setWebStatus(`Web results: ${mergedWeb.length} — writing takeaways…`);
+
+    const takeawaysOut: WebTakeaway[] = [];
+
+    for (let i = 0; i < parsed.bullets.length; i++) {
+      const bulletText = parsed.bullets[i].text;
+
+      const ranked = [...mergedWeb]
+        .map((r) => ({ r, s: scoreBulletToWeb(bulletText, r) }))
+        .sort((x, y) => y.s - x.s)
+        .map((x) => x.r);
+
+      const top = ranked[0];
+      if (!top) continue;
+
+      const promptOne = buildSingleWebTakeawayPrompt({
+        lessonTitle,
+        bulletText,
+        source: {
+          title: String(top.title || "").trim(),
+          snippet: String(top.snippet || "").slice(0, 340),
+          url: String(top.url || "").trim(),
+          source: String(top.source || "web"),
+        },
+      });
+
+      const textRaw = await generateText(modelId, promptOne);
+      const text = String(textRaw || "")
+        .trim()
+        .replace(/^["'\s]+|["'\s]+$/g, "");
+
+      if (!text || text.toUpperCase().includes("NO_TAKEAWAY")) continue;
+
+      takeawaysOut.push({
+        bulletIndex: i,
+        text,
+        url: String(top.url || "").trim(),
+        title: String(top.title || "").trim() || "Web result",
+        source: String(top.source || "web"),
+      });
+    }
+
+    setWebTakeaways(takeawaysOut.slice(0, 12));
+    setWebStatus(`Web takeaways ready ✅ (${takeawaysOut.length})`);
+  } catch (e: any) {
+    setWebTakeaways([]);
+    setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
+  }
+} else {
+  setWebTakeaways([]);
+  setWebStatus("");
+}        
 
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
