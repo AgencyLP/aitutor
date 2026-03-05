@@ -17,6 +17,7 @@ import PdfCitationPreview from "../components/PdfCitationPreview";
 
 import { webSearchPool } from "../web/webSearch";
 import type { WebResult } from "../web/wikiSearch";
+import TutorAvatar3D from "../components/TutorAvatar3D";
 
 type IndexState =
   | { status: "idle" }
@@ -912,7 +913,7 @@ if (useWeb) {
         {/* CENTER */}
         <main className="whiteboard-stage">
           {/* ✅ AVATAR TOP-MIDDLE */}
-          <AvatarSpeaker speaking={isSpeaking} />
+          <TutorAvatar3D speaking={isSpeaking} height={800} />
 
           <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
             {lessonState.status !== "ready" ? (
