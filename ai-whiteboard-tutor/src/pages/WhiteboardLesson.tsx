@@ -18,8 +18,6 @@ import PdfCitationPreview from "../components/PdfCitationPreview";
 import { webSearchPool } from "../web/webSearch";
 import type { WebResult } from "../web/wikiSearch";
 
-/* ---------------- Types ---------------- */
-
 type IndexState =
   | { status: "idle" }
   | { status: "indexing"; filename: string }
@@ -54,16 +52,8 @@ type WebTakeaway = {
   text: string;
   url: string;
   title: string;
-  source: string;
+  source: string; // keep string (wikipedia/duckduckgo/web)
 };
-
-function isReadyLessonState(
-  s: LessonState
-): s is Extract<LessonState, { status: "ready" }> {
-  return s.status === "ready";
-}
-
-/* ---------------- Helpers: JSON parsing ---------------- */
 
 function extractBetween(text: string, startTag: string, endTag: string) {
   const a = text.indexOf(startTag);
@@ -72,102 +62,87 @@ function extractBetween(text: string, startTag: string, endTag: string) {
   return text.slice(a + startTag.length, b).trim();
 }
 
-function extractLargestJsonObject(text: string) {
-  const s = String(text || "");
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first === -1 || last === -1 || last <= first) return null;
-  return s.slice(first, last + 1);
-}
-
 function safeParseLesson(text: string): Lesson | null {
   const marked = extractBetween(text, "JSON_START", "JSON_END");
+  const candidate =
+    marked ??
+    extractFirstJsonObject(text) ??
+    extractFirstJsonObject("{" + text) ??
+    text;
 
-  const candidates = [
-    marked,
-    extractLargestJsonObject(text),
-    extractFirstJsonObject(text),
-    extractFirstJsonObject("{" + text),
-    text,
-  ].filter(Boolean) as string[];
+  try {
+    const obj = JSON.parse(candidate);
 
-  for (const candidateRaw of candidates) {
-    const candidate = String(candidateRaw)
-      .trim()
-      .replace(/[\u0000-\u001F\u007F]/g, "");
+    if (!obj || typeof obj !== "object") return null;
+    if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
 
-    try {
-      const obj = JSON.parse(candidate);
+    const diagramType =
+      obj.diagram?.type === "flowchart" || obj.diagram?.type === "timeline"
+        ? obj.diagram.type
+        : "concept_map";
 
-      const rawTitle = typeof obj?.title === "string" ? obj.title : "";
-      const title = String(rawTitle || "Lesson").trim();
+    const bullets: Bullet[] = Array.isArray(obj.bullets)
+      ? obj.bullets
+          .map((b: any) => ({
+            text: String(b?.text ?? "").trim(),
+            cites: Array.isArray(b?.cites)
+              ? b.cites
+                  .map((c: any) => ({
+                    page: Number(c?.page),
+                    chunkId: String(c?.chunkId ?? ""),
+                    quote: String(c?.quote ?? ""),
+                  }))
+                  .filter(
+                    (c: any) =>
+                      Number.isFinite(c.page) &&
+                      c.page > 0 &&
+                      c.chunkId &&
+                      c.quote
+                  )
+              : [],
+          }))
+          .filter((b: any) => b.text)
+          .slice(0, 12)
+      : [];
 
-      const rawBullets: unknown[] = Array.isArray(obj?.bullets) ? obj.bullets : [];
-      const mappedBullets: Bullet[] = rawBullets
-        .map((x: unknown): Bullet => {
-          if (typeof x === "string") return { text: x.trim(), cites: [] };
-          const t = String((x as any)?.text ?? "").trim();
-          return { text: t, cites: [] };
-        })
-        .filter((b: Bullet) => Boolean(b.text))
-        .slice(0, 12);
+    const lesson: Lesson = {
+      title: String(obj.title).trim(),
+      bullets,
+      diagram: {
+        type: diagramType,
+        nodes: Array.isArray(obj.diagram?.nodes)
+          ? obj.diagram.nodes
+              .map((n: any, i: number) => ({
+                id: String(n.id ?? `n${i + 1}`),
+                label: String(n.label ?? "").trim(),
+              }))
+              .filter((n: any) => n.label)
+              .slice(0, 8)
+          : [],
+        edges: Array.isArray(obj.diagram?.edges)
+          ? obj.diagram.edges
+              .map((e: any) => ({
+                from: String(e.from ?? ""),
+                to: String(e.to ?? ""),
+                label: e.label ? String(e.label) : "",
+              }))
+              .filter((e: any) => e.from && e.to)
+              .slice(0, 10)
+          : [],
+      },
+      notes: obj.notes ? String(obj.notes).trim() : "",
+    };
 
-      if (!mappedBullets.length) continue;
+    if (!lesson.title || lesson.title.toLowerCase() === "string") return null;
+    if (lesson.bullets.length === 0) return null;
+    if (lesson.bullets.some((b) => b.text.toLowerCase() === "string")) return null;
+    if (lesson.bullets.every((b) => (b.cites?.length ?? 0) === 0)) return null;
 
-      const diagramType: Diagram["type"] =
-        obj?.diagram?.type === "flowchart" || obj?.diagram?.type === "timeline"
-          ? obj.diagram.type
-          : "concept_map";
-
-      let nodes: Array<{ id: string; label: string }> = [];
-      let edges: Array<{ from: string; to: string; label?: string }> = [];
-
-      if (obj?.diagram && typeof obj.diagram === "object") {
-        if (Array.isArray(obj.diagram.nodes)) {
-          nodes = (obj.diagram.nodes as unknown[])
-            .map((n: unknown, i: number) => ({
-              id: String((n as any)?.id ?? `n${i + 1}`),
-              label: String((n as any)?.label ?? "").trim(),
-            }))
-            .filter((n: { id: string; label: string }) => Boolean(n.label))
-            .slice(0, 8);
-        }
-        if (Array.isArray(obj.diagram.edges)) {
-          edges = (obj.diagram.edges as unknown[])
-            .map((e: unknown) => ({
-              from: String((e as any)?.from ?? ""),
-              to: String((e as any)?.to ?? ""),
-              label: (e as any)?.label ? String((e as any).label) : "",
-            }))
-            .filter((e: { from: string; to: string; label?: string }) => Boolean(e.from && e.to))
-            .slice(0, 10);
-        }
-      }
-
-      if (!nodes.length) {
-        const top = mappedBullets[0]?.text ?? title;
-        const others = mappedBullets.slice(1, 7).map((b: Bullet, i: number) => ({
-          id: `n${i + 2}`,
-          label: b.text.length > 40 ? b.text.slice(0, 40) + "…" : b.text,
-        }));
-        nodes = [{ id: "n1", label: top.length > 40 ? top.slice(0, 40) + "…" : top }, ...others].slice(0, 8);
-        edges = others.map((n) => ({ from: "n1", to: n.id, label: "" })).slice(0, 10);
-      }
-
-      return {
-        title: title.toLowerCase() === "string" ? "Lesson" : title,
-        bullets: mappedBullets,
-        diagram: { type: diagramType, nodes, edges },
-        notes: obj?.notes ? String(obj.notes).trim() : "",
-      };
-    } catch {
-      // try next candidate
-    }
+    return lesson;
+  } catch {
+    return null;
   }
-  return null;
 }
-
-/* ---------------- Helpers: Web evidence (short + clean) ---------------- */
 
 function tokenize(s: string) {
   return (s || "")
@@ -180,126 +155,116 @@ function tokenize(s: string) {
 
 function scoreBulletToWeb(bulletText: string, r: WebResult) {
   const a = tokenize(bulletText);
-  const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 400));
+  const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 300));
   const setB = new Set(b);
   let hit = 0;
   for (const t of a) if (setB.has(t)) hit++;
   return hit;
 }
 
-function cleanOneLine(s: string) {
-  return (s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+function pickHighlightPhrase(chunkText: string) {
+  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return clean.split(" ").slice(0, 14).join(" ");
 }
-
-function isQuestiony(text: string) {
-  const t = cleanOneLine(text).toLowerCase();
-  if (!t) return false;
-  if (t.includes("?")) return true;
-  return (
-    t.startsWith("what is ") ||
-    t.startsWith("what are ") ||
-    t.startsWith("how to ") ||
-    t.startsWith("why ") ||
-    t.startsWith("when ") ||
-    t.startsWith("where ")
-  );
-}
-
-function firstCleanSentence(text: string) {
-  const s = cleanOneLine(text);
-  if (!s) return "";
-  const m = s.match(/^(.{25,}?[.!?])\s/);
-  if (m?.[1]) return m[1].trim();
-  return s.split(/ — | - /)[0].trim() || s;
-}
-
-function trimEndJunk(text: string) {
-  let t = cleanOneLine(text);
-  t = t.replace(/[,:;–—-]+$/g, "").trim();
-  t = t.replace(/(\.\.\.|…)+$/g, "").trim();
-  return t;
-}
-
-function toWebEvidenceLine(r: WebResult, explainLevel: "simple" | "normal") {
-  const title = cleanOneLine(String(r?.title ?? ""));
-  const snippet = cleanOneLine(String(r?.snippet ?? ""));
-
-  let base = firstCleanSentence(snippet);
-  if (base.length < 35) base = firstCleanSentence(title) || title;
-  base = trimEndJunk(base);
-
-  const maxLen = explainLevel === "simple" ? 120 : 220;
-
-  if (base.length > maxLen) {
-    let cut = base.slice(0, maxLen).trim();
-    const lastSpace = cut.lastIndexOf(" ");
-    if (lastSpace > 60) cut = cut.slice(0, lastSpace).trim();
-    return trimEndJunk(cut) + "…";
-  }
-
-  return base || "Open source for supporting context.";
-}
-
-function formatSourceLabel(source: string) {
-  const s = (source || "").toLowerCase().trim();
-  if (s === "wikipedia") return "Wikipedia";
-  if (s === "duckduckgo") return "Search result";
-  return "Web";
-}
-
-/* ---------------- Helpers: PDF quote/highlight ---------------- */
 
 function snippetFromChunkText(chunkText: string) {
   const clean = (chunkText || "").replace(/\s+/g, " ").trim();
-  return clean ? clean.slice(0, 220) : "";
+  if (!clean) return "";
+  return clean.slice(0, 220);
 }
 
-function normalizeForFind(s: string) {
-  return (s || "")
-    .toLowerCase()
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .trim();
-}
-
-function chooseHighlightPhrase(params: {
-  chunkText: string;
-  pageText: string;
-  explainLevel: "simple" | "normal";
+function buildWebTakeawaysPrompt(params: {
+  lessonTitle: string;
+  bullets: string[];
+  picks: Array<{ bulletIndex: number; source: string; title: string; snippet: string; url: string }>;
 }) {
-  const chunk = cleanOneLine(params.chunkText);
-  const page = cleanOneLine(params.pageText);
-  if (!chunk || !page) return "";
+  const picksBlock = params.picks
+    .map(
+      (p) => `
+BULLET_INDEX: ${p.bulletIndex}
+SOURCE: ${p.source}
+TITLE: ${p.title}
+SNIPPET: ${p.snippet}
+URL: ${p.url}
+`.trim()
+    )
+    .join("\n\n---\n\n");
 
-  const chunkN = normalizeForFind(chunk);
-  const pageN = normalizeForFind(page);
+  return `
+You are writing "Web Takeaways" for an EdTech AI tutor UI.
 
-  const targetChars = params.explainLevel === "simple" ? 80 : 140;
-  const step = 40;
-  const starts = [0, Math.floor(chunkN.length * 0.25), Math.floor(chunkN.length * 0.5)];
-  const originalClean = cleanOneLine(params.chunkText);
+RULES (very important):
+- Use ONLY the provided snippets. Do NOT invent facts.
+- Write 1 short sentence that SUPPORTS or ADDS CONTEXT for the bullet topic.
+- Output MUST be valid JSON ONLY.
+- Do NOT output placeholder words like "string".
+- Keep it concise.
 
-  for (const start0 of starts) {
-    for (let start = start0; start < Math.min(chunkN.length - 40, start0 + 260); start += step) {
-      const candidate = chunkN.slice(start, Math.min(chunkN.length, start + targetChars)).trim();
-      if (candidate.length < 50) continue;
-      if (pageN.indexOf(candidate) !== -1) {
-        const originalCandidate = originalClean
-          .slice(start, Math.min(originalClean.length, start + targetChars))
-          .trim();
-        const cleaned = trimEndJunk(originalCandidate);
-        if (cleaned.length >= 40) return cleaned;
-      }
-    }
-  }
+Return JSON array with EXACT schema:
+[
+  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "wikipedia|duckduckgo|web" }
+]
 
-  return trimEndJunk(firstCleanSentence(chunk)) || "";
+LESSON_TITLE: ${params.lessonTitle}
+
+BULLETS:
+${params.bullets.map((b, i) => `${i}: ${b}`).join("\n")}
+
+WEB_PICKS:
+${picksBlock}
+`.trim();
 }
 
-/* ---------------- UI: Avatar ---------------- */
+function buildWebTakeawaysRepairPrompt(badText: string) {
+  return `
+Rewrite the following into VALID JSON ONLY.
+It must be a JSON array of objects exactly like:
+[
+  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "web" }
+]
 
+TEXT:
+${badText}
+`.trim();
+}
+
+function safeParseWebTakeaways(text: string): WebTakeaway[] | null {
+  const marked = extractBetween(text, "JSON_START", "JSON_END");
+  const candidate =
+    marked ??
+    extractFirstJsonObject(text) ??
+    extractFirstJsonObject("[" + text) ??
+    text;
+
+  try {
+    const arr = JSON.parse(candidate);
+    if (!Array.isArray(arr)) return null;
+
+    const out: WebTakeaway[] = arr
+      .map((x: any) => ({
+        bulletIndex: Number(x?.bulletIndex),
+        text: String(x?.text ?? "").trim(),
+        url: String(x?.url ?? "").trim(),
+        title: String(x?.title ?? "").trim(),
+        source: String(x?.source ?? "web").trim(),
+      }))
+      .filter(
+        (x) =>
+          Number.isFinite(x.bulletIndex) &&
+          x.bulletIndex >= 0 &&
+          x.text &&
+          x.url &&
+          x.title
+      );
+
+    return out.length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ✅ Free mini-avatar (no model) that animates while speaking */
 function AvatarSpeaker({ speaking }: { speaking: boolean }) {
   const [mouthOpen, setMouthOpen] = useState(false);
 
@@ -369,8 +334,6 @@ function AvatarSpeaker({ speaking }: { speaking: boolean }) {
   );
 }
 
-/* ---------------- Component ---------------- */
-
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -393,9 +356,8 @@ export default function WhiteboardLesson() {
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
 
   const modelId =
-    (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "Llama-3.2-3B-Instruct-q4f16_1-MLC";
-
-  const readyLesson = isReadyLessonState(lessonState) ? lessonState.lesson : null;
+    (import.meta as any).env?.VITE_WEBLLM_MODEL ??
+    "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
   function speakTextLocal(text: string) {
     if (!("speechSynthesis" in window)) return;
@@ -404,10 +366,15 @@ export default function WhiteboardLesson() {
     setIsSpeaking(false);
 
     const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = 1.0;
+    utter.pitch = 1.0;
+    utter.volume = 1.0;
 
     const voices = window.speechSynthesis.getVoices();
-    const preferThai = voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
-    const preferEnglish = voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
+    const preferThai =
+      voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
+    const preferEnglish =
+      voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
 
     if (preferThai) utter.voice = preferThai;
     else if (preferEnglish) utter.voice = preferEnglish;
@@ -427,6 +394,8 @@ export default function WhiteboardLesson() {
     return "Error";
   }, [indexState]);
 
+  const onPickFile = () => fileInputRef.current?.click();
+
   const handleFile = async (file: File) => {
     try {
       if (!file.name.toLowerCase().endsWith(".pdf")) {
@@ -442,7 +411,7 @@ export default function WhiteboardLesson() {
       setWebTakeaways([]);
 
       const bytes = await file.arrayBuffer();
-      setPdfData(bytes.slice(0));
+      setPdfData(bytes.slice(0)); // avoid detached buffer issues
 
       const pdf = await extractPdfText(file);
 
@@ -452,8 +421,8 @@ export default function WhiteboardLesson() {
         numPages: pdf.numPages,
         pdf,
       });
-    } catch (e: unknown) {
-      setIndexState({ status: "error", message: (e as any)?.message ?? "Failed to read PDF." });
+    } catch (e: any) {
+      setIndexState({ status: "error", message: e?.message ?? "Failed to read PDF." });
     }
   };
 
@@ -481,12 +450,15 @@ export default function WhiteboardLesson() {
 
     const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
 
+    // map chunkId -> real text for preview
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
 
-    const seedQuery = "summary key concepts definitions statistics findings implications conclusion";
+    const seedQuery =
+      "summary key concepts definitions statistics findings implications conclusion";
 
+    // guarantee at least 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -541,7 +513,7 @@ JSON_END
     try {
       setLessonState({ status: "loadingModel", message: "Loading model…" });
 
-      const raw = await generateText(modelId, prompt, (msg: string) => {
+      const raw = await generateText(modelId, prompt, (msg) => {
         setLessonState({ status: "loadingModel", message: msg });
       });
 
@@ -562,16 +534,21 @@ JSON_END
               status: "error",
               message:
                 "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
-              raw: raw + "\n\n----- REPAIR #1 -----\n\n" + repaired1 + "\n\n----- REPAIR #2 -----\n\n" + repaired2,
+              raw:
+                raw +
+                "\n\n----- REPAIR #1 -----\n\n" +
+                repaired1 +
+                "\n\n----- REPAIR #2 -----\n\n" +
+                repaired2,
             });
             return;
           }
         }
       }
 
-      // Attach citations ourselves
+      // re-rank citations per bullet
       const usedChunkIds = new Set<string>();
-      const fixedBullets: Bullet[] = parsed.bullets.map((b: Bullet) => {
+      const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
 
         const picked: typeof candidates = [];
@@ -582,112 +559,131 @@ JSON_END
           }
           if (picked.length >= 2) break;
         }
+
         if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
         if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
 
-        const cites: Citation[] = picked.map((c) => {
-          const pageText = indexState.pdf.pages?.[c.page - 1]?.text ?? "";
-          const phrase =
-            chooseHighlightPhrase({ chunkText: c.text, pageText, explainLevel }) || snippetFromChunkText(c.text);
-          return { page: c.page, chunkId: c.id, quote: phrase };
-        });
+        const cites = picked.map((c) => ({
+          page: c.page,
+          chunkId: c.id,
+          quote: snippetFromChunkText(c.text),
+        }));
 
         return { ...b, cites };
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      // Show lesson immediately
-      setLessonState({ status: "ready", lesson: parsed, raw });
-      setOpenBulletIndex(null);
-      setPreview(null);
-
-      // Web evidence runs after (non-blocking)
+      // web takeaways (one sentence per bullet)
       if (useWeb) {
-        setWebStatus("Searching web…");
-        setWebTakeaways([]);
+        try {
+          setWebStatus("Searching web…");
 
-        void (async () => {
-          try {
-            const lessonTitle = parsed.title || "EdTech AI";
-            const queries = [
-              lessonTitle,
-              `${lessonTitle} statistics`,
-              "Artificial intelligence in education",
-              "Intelligent tutoring system",
-              "Educational technology",
-            ];
+          const lessonTitle = parsed.title || "EdTech AI";
+          const queries = [
+            lessonTitle,
+            `${lessonTitle} statistics`,
+            "Artificial intelligence in education",
+            "Intelligent tutoring system",
+            "Educational technology",
+          ];
 
-            const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
+          const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
 
-            const mergedWeb: WebResult[] = [];
-            const seenUrls2 = new Set<string>();
-            for (const arr of pools) {
-              for (const r of arr) {
-                if (!r?.url) continue;
-                if (seenUrls2.has(r.url)) continue;
-                seenUrls2.add(r.url);
-                mergedWeb.push(r);
-              }
+          const mergedWeb: WebResult[] = [];
+          const seenUrls = new Set<string>();
+          for (const arr of pools) {
+            for (const r of arr) {
+              if (!r?.url) continue;
+              if (seenUrls.has(r.url)) continue;
+              seenUrls.add(r.url);
+              mergedWeb.push(r);
             }
-
-            const cleanedWeb = mergedWeb.filter((r) => {
-              const t = cleanOneLine(r.title || "");
-              const s = cleanOneLine(r.snippet || "");
-              if (!t || !r.url) return false;
-              if (isQuestiony(t) && isQuestiony(s)) return false;
-              if (s.length < 35 && isQuestiony(t)) return false;
-              return true;
-            });
-
-            const takeaways: WebTakeaway[] = parsed.bullets
-              .map((b: Bullet, i: number) => {
-                const ranked = [...cleanedWeb]
-                  .map((r) => {
-                    const overlap = scoreBulletToWeb(b.text, r);
-                    const isWiki =
-                      String((r as any).source || "").toLowerCase() === "wikipedia";
-                    const qPenalty = isQuestiony(r.title || "") ? 2 : 0;
-                    const lenBonus = Math.min(
-                      3,
-                      Math.floor((cleanOneLine(r.snippet || "").length || 0) / 80)
-                    );
-                    const score = overlap + (isWiki ? 2 : 0) + lenBonus - qPenalty;
-                    return { r, score };
-                  })
-                  .sort((x, y) => y.score - x.score)
-                  .map((x) => x.r);
-
-                const top = ranked[0];
-                if (!top) return null;
-
-                return {
-                  bulletIndex: i,
-                  text: toWebEvidenceLine(top, explainLevel),
-                  url: cleanOneLine(String(top.url || "")),
-                  title: cleanOneLine(String(top.title || "Web source")),
-                  source: cleanOneLine(String((top as any).source || "web")),
-                };
-              })
-              .filter(Boolean) as WebTakeaway[];
-
-            setWebTakeaways(takeaways.slice(0, 12));
-            setWebStatus(`Web evidence ready ✅ (${takeaways.length})`);
-          } catch (e: unknown) {
-            setWebTakeaways([]);
-            setWebStatus(`Web failed: ${(e as any)?.message ?? "Unknown error"}`);
           }
-        })();
+
+          const picks = parsed.bullets
+            .map((b, i) => {
+              const ranked = [...mergedWeb]
+                .map((r) => ({ r, s: scoreBulletToWeb(b.text, r) }))
+                .sort((x, y) => y.s - x.s)
+                .map((x) => x.r);
+
+              const top = ranked[0];
+              if (!top) return null;
+
+              return {
+                bulletIndex: i,
+                source: String(top.source || "web"),
+                title: String(top.title || "").trim(),
+                snippet: String(top.snippet || "").slice(0, 320),
+                url: String(top.url || "").trim(),
+              };
+            })
+            .filter(Boolean) as Array<{
+            bulletIndex: number;
+            source: string;
+            title: string;
+            snippet: string;
+            url: string;
+          }>;
+
+          setWebStatus(`Web results: ${mergedWeb.length} — writing takeaways…`);
+
+          const webPrompt = buildWebTakeawaysPrompt({
+            lessonTitle,
+            bullets: parsed.bullets.map((b) => b.text),
+            picks,
+          });
+
+          const webPromptWithMarkers = `
+${webPrompt}
+
+Output MUST be between markers:
+JSON_START
+[ ... ]
+JSON_END
+`.trim();
+
+          const webRaw = await generateText(modelId, webPromptWithMarkers);
+          let takeaways = safeParseWebTakeaways(webRaw);
+
+          if (!takeaways) {
+            const repaired = await generateText(modelId, buildWebTakeawaysRepairPrompt(webRaw));
+            takeaways = safeParseWebTakeaways(repaired);
+          }
+
+          if (!takeaways) {
+            setWebStatus("Web takeaways failed (JSON). Showing snippet fallback.");
+            const fallback: WebTakeaway[] = picks.slice(0, 12).map((p) => ({
+              bulletIndex: p.bulletIndex,
+              text: p.snippet ? p.snippet.slice(0, 180) : "No snippet available.",
+              url: p.url,
+              title: p.title || "Web result",
+              source: p.source || "web",
+            }));
+            setWebTakeaways(fallback);
+          } else {
+            setWebTakeaways(takeaways.slice(0, 12));
+            setWebStatus(`Web takeaways ready ✅ (${takeaways.length})`);
+          }
+        } catch (e: any) {
+          setWebTakeaways([]);
+          setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
+        }
       } else {
         setWebTakeaways([]);
         setWebStatus("");
       }
 
-      const speech = `${parsed.title}. ${parsed.bullets.map((x) => x.text).join(" ")}`;
+      setLessonState({ status: "ready", lesson: parsed, raw });
+      setOpenBulletIndex(null);
+      setPreview(null);
+
+      const speech = `${parsed.title}. ${parsed.bullets.map((b) => b.text).join(" ")}`;
       setLastSpoken(speech);
       speakTextLocal(speech);
-    } catch (e: unknown) {
-      setLessonState({ status: "error", message: (e as any)?.message ?? "Failed to generate lesson." });
+    } catch (e: any) {
+      setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
     }
   }
 
@@ -802,17 +798,13 @@ JSON_END
             title="Click to upload or drag a PDF here"
           >
             <p style={{ margin: 0 }}>
-              {indexState.status === "indexed"
-                ? `PDF: ${indexState.filename}`
-                : "Click or drag PDF here"}
+              {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
             </p>
 
             <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
-              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>
-                {indexState.message}
-              </div>
+              <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
             )}
           </div>
 
@@ -846,44 +838,44 @@ JSON_END
 
         {/* CENTER */}
         <main className="whiteboard-stage">
+          {/* ✅ AVATAR TOP-MIDDLE */}
           <AvatarSpeaker speaking={isSpeaking} />
 
           <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
-            {!readyLesson ? (
+            {lessonState.status !== "ready" ? (
               <>
                 <div className="lesson-chunk">
-                  <strong>
-                    {indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}
-                  </strong>
+                  <strong>{indexState.status === "indexed" ? "Ready. Click Start Lesson." : "Upload a PDF to start."}</strong>
                   <div style={{ marginTop: 10, color: "#64748B", fontSize: 14 }}>
                     This demo runs AI on your laptop (WebGPU) and teaches from the PDF.
                   </div>
                 </div>
 
                 <div className="diagram-box">
-                  {indexState.status === "indexed"
-                    ? "[ Waiting to generate lesson… ]"
-                    : "[ Whiteboard area — waiting for PDF ]"}
+                  {indexState.status === "indexed" ? "[ Waiting to generate lesson… ]" : "[ Whiteboard area — waiting for PDF ]"}
                 </div>
               </>
             ) : (
               <>
                 <div className="lesson-chunk">
-                  <strong>{readyLesson.title}</strong>
+                  <strong>{lessonState.lesson.title}</strong>
                 </div>
 
-                {readyLesson.bullets.map((b: Bullet, i: number) => {
+                {lessonState.lesson.bullets.map((b, i) => {
                   const openPdf = openBulletIndex === i;
                   const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : undefined;
 
                   return (
                     <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+                      {/* main bullet row */}
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ marginTop: 2 }}>•</div>
 
                         <div style={{ flex: 1 }}>
+                          {/* PDF sentence */}
                           <div>{b.text}</div>
 
+                          {/* ✅ WEB sentence (blue box) */}
                           {useWeb && (
                             <div
                               style={{
@@ -900,18 +892,14 @@ JSON_END
                             >
                               <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
-                                  🌐 Web{" "}
-                                  {w?.source ? (
-                                    <span style={{ marginLeft: 8, opacity: 0.7 }}>
-                                      {formatSourceLabel(w.source)}
-                                    </span>
-                                  ) : null}
+                                  🌐 Web
                                 </div>
                                 <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
-                                  {w ? w.text : "No relevant web source found for this bullet."}
+                                  {w ? w.text : "No relevant web result found for this bullet."}
                                 </div>
                               </div>
 
+                              {/* web link button */}
                               {w ? (
                                 <a
                                   href={w.url}
@@ -951,20 +939,28 @@ JSON_END
                           )}
                         </div>
 
+                        {/* PDF source button */}
                         <button
                           className="source-pill"
                           title="Show PDF source + open preview"
                           style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
                           onClick={() => {
                             setOpenBulletIndex(openPdf ? null : i);
+
                             const first = b.cites?.[0];
-                            if (first) setPreview({ page: first.page, chunkId: first.chunkId, phrase: first.quote });
+                            if (first) {
+                              const real = chunkMapRef.current.get(first.chunkId);
+                              const page = real?.page ?? first.page;
+                              const phrase = pickHighlightPhrase(real?.text ?? "");
+                              setPreview({ page, chunkId: first.chunkId, phrase });
+                            }
                           }}
                         >
                           📄
                         </button>
                       </div>
 
+                      {/* PDF citations */}
                       {openPdf && b.cites?.length > 0 && (
                         <div
                           style={{
@@ -978,38 +974,43 @@ JSON_END
                             color: "#334155",
                           }}
                         >
-                          {b.cites.map((c: Citation, idx: number) => (
-                            <div
-                              key={idx}
-                              style={{
-                                marginBottom: 10,
-                                paddingBottom: 10,
-                                borderBottom: "1px solid #f1f5f9",
-                                cursor: "pointer",
-                              }}
-                              title="Click to open PDF preview + highlight"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setPreview({ page: c.page, chunkId: c.chunkId, phrase: c.quote });
-                              }}
-                            >
-                              <div>
-                                <b>p.{c.page}</b> — <code>{c.chunkId}</code>
+                          {b.cites.map((c, idx) => {
+                            const real = chunkMapRef.current.get(c.chunkId);
+                            const page = real?.page ?? c.page;
+                            const phrase = pickHighlightPhrase(real?.text ?? "");
+                            return (
+                              <div
+                                key={idx}
+                                style={{
+                                  marginBottom: 10,
+                                  paddingBottom: 10,
+                                  borderBottom: "1px solid #f1f5f9",
+                                  cursor: "pointer",
+                                }}
+                                title="Click to open PDF preview + highlight"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPreview({ page, chunkId: c.chunkId, phrase });
+                                }}
+                              >
+                                <div>
+                                  <b>p.{page}</b> — <code>{c.chunkId}</code>
+                                </div>
+                                <div style={{ opacity: 0.9 }}>"{phrase ? phrase + "…" : c.quote}"</div>
                               </div>
-                              <div style={{ opacity: 0.9 }}>"{c.quote}"</div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
                   );
                 })}
 
-                <DiagramPanel diagram={readyLesson.diagram} />
+                <DiagramPanel diagram={lessonState.lesson.diagram} />
 
-                {readyLesson.notes && readyLesson.notes !== "string" && (
+                {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
                   <div style={{ marginTop: 16, fontSize: 12, color: "#64748B" }}>
-                    Note: {readyLesson.notes}
+                    Note: {lessonState.lesson.notes}
                   </div>
                 )}
               </>
@@ -1037,6 +1038,7 @@ JSON_END
         </aside>
       </div>
 
+      {/* PDF Preview Modal */}
       <PdfCitationPreview
         open={!!preview}
         onClose={() => setPreview(null)}
@@ -1048,8 +1050,6 @@ JSON_END
     </>
   );
 }
-
-/* ---------------- Diagram panel ---------------- */
 
 function DiagramPanel({ diagram }: { diagram: Diagram }) {
   const width = 800;
