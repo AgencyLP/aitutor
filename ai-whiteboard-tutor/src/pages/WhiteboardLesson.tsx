@@ -153,6 +153,12 @@ function tokenize(s: string) {
     .filter((x) => x.length >= 2);
 }
 
+function isPdfBulletTooShort(text: string) {
+  const t = (text || "").trim();
+  const words = tokenize(t);
+  return t.length < 45 || words.length < 7;
+}
+
 function scoreBulletToWeb(bulletText: string, r: WebResult) {
   const a = tokenize(bulletText);
   const b = tokenize((r.title + " " + (r.snippet || "")).slice(0, 300));
@@ -598,6 +604,70 @@ JSON_END
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
+
+      // ✅ Fix "heading-only" PDF bullets by rewriting them into a real sentence
+      // using ONLY the cited PDF text (no web).
+      const upgradedBullets: Bullet[] = [];
+      let rewrites = 0;
+      const MAX_REWRITES = 6;
+
+      for (const b of parsed.bullets) {
+        // If it's already a good sentence, keep it
+        if (!isPdfBulletTooShort(b.text)) {
+          upgradedBullets.push(b);
+          continue;
+        }
+        if (rewrites >= MAX_REWRITES) {
+           upgradedBullets.push(b);
+          continue;
+        }
+rewrites++;
+
+        // Pull the cited PDF text as evidence
+        const citeTexts = (b.cites || [])
+          .slice(0, 2)
+          .map((c) => chunkMapRef.current.get(c.chunkId)?.text || "")
+          .filter(Boolean);
+
+        const evidenceText = citeTexts.join("\n\n---\n\n").trim();
+
+        // If we somehow don't have evidence, fallback to the first cite quote
+        if (!evidenceText) {
+          const fallback = (b.cites?.[0]?.quote || "").trim();
+          upgradedBullets.push({
+            ...b,
+            text: fallback.length ? fallback : b.text,
+          });
+          continue;
+        }
+
+        // Ask the model to rewrite into ONE clear sentence from the PDF evidence
+        const rewritePrompt = `
+Rewrite the following into ONE clear explanatory sentence for a student (12–25 words).
+RULES:
+- Start with a normal sentence (no headings).
+- Use ONLY the PDF excerpt below. Do NOT add facts.
+- Output plain text only (no JSON, no quotes, no markdown).
+- Keep it concise but meaningful (not a heading).
+
+EXPLAIN_LEVEL: ${explainLevel}
+
+PDF_EXCERPT:
+${evidenceText}
+`.trim();
+
+        const rewrittenRaw = await generateText(modelId, rewritePrompt);
+        const rewritten = String(rewrittenRaw || "").trim();
+
+        // If model still gives something too short, fallback to a snippet
+        const finalText = isPdfBulletTooShort(rewritten)
+        ? ((b.cites?.[0]?.quote || "").trim() || snippetFromChunkText(evidenceText))
+        : rewritten;
+
+        upgradedBullets.push({ ...b, text: finalText });
+      }
+
+      parsed = { ...parsed, bullets: upgradedBullets };
 // web takeaways (one sentence per bullet)
 if (useWeb) {
   try {
