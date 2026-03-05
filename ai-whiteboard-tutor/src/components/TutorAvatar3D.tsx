@@ -35,15 +35,14 @@ function AutoFrame({
 
     const fov = cam.fov * (Math.PI / 180);
 
-    // ✅ Fit to HEIGHT so full body can show
+    // Fit to HEIGHT
     let distance = size.y / (2 * Math.tan(fov / 2));
-    distance *= 1.28; // padding (you said this looked perfect)
+    distance *= 1.28; // your “perfect” padding
 
-    // Aim a bit low so shoes fit
+    // Aim slightly low so shoes fit
     const aim = center.clone();
     aim.y = center.y + size.y * 0.10;
 
-    // Lower camera a bit so legs are not cropped
     cam.position.set(center.x, center.y - size.y * 0.15, center.z + distance);
     cam.lookAt(aim);
     cam.updateProjectionMatrix();
@@ -59,6 +58,7 @@ type Bones = {
   leftArm: THREE.Object3D | null;
   rightArm: THREE.Object3D | null;
   jaw: THREE.Object3D | null;
+  mouthMesh: THREE.Object3D | null;
 };
 
 function Model({ speaking }: { speaking: boolean }) {
@@ -77,7 +77,10 @@ function Model({ speaking }: { speaking: boolean }) {
     const jaw: THREE.Object3D | null =
       findByIncludes(root, "mixamorigjaw") || findByIncludes(root, "jaw");
 
-    return { head, leftShoulder, rightShoulder, leftArm, rightArm, jaw };
+    // From your node list: "mouthinside" exists
+    const mouthMesh: THREE.Object3D | null = findByIncludes(root, "mouthinside");
+
+    return { head, leftShoulder, rightShoulder, leftArm, rightArm, jaw, mouthMesh };
   }, [gltf.scene]);
 
   // Pose fix (stable): store rest pose and apply offsets
@@ -109,37 +112,54 @@ function Model({ speaking }: { speaking: boolean }) {
       b.rotation.set(r.x + dx, r.y + dy, r.z + dz);
     };
 
-    // Head: look forward slightly
     if (head) head.rotation.x = -0.12;
 
-    // ✅ Your working shoulder offsets (arms forward, not behind)
+    // Your working shoulder offsets
     applyFromRest(leftShoulder, 0.05, 0.35, 0);
     applyFromRest(rightShoulder, 0.05, -0.35, 0);
 
-    // ✅ Arms: keep them down naturally (leave these as your “done” values)
-    // If you already tuned these in your file, paste your tuned numbers here.
+    // Your working upper arm offsets
     applyFromRest(leftArm, 0.55, 0.25, -0.12);
     applyFromRest(rightArm, 0.55, -0.25, 0.12);
 
     gltf.scene.updateMatrixWorld(true);
-
-    // Force AutoFrame to re-run after pose changes
     setFrameVersion((v) => v + 1);
   }, [bones, gltf.scene]);
 
-  // Basic talking (only if jaw exists)
+  // ✅ Talking: jaw if available, otherwise animate mouthinside mesh
   useEffect(() => {
-    const { jaw } = bones;
-    if (!jaw) return;
+    const { jaw, mouthMesh } = bones;
+    if (!jaw && !mouthMesh) return;
+
+    // Remember mouth mesh original scale once
+    const mouthAny = mouthMesh as any;
+    if (mouthMesh && !mouthAny.__baseScale) {
+      mouthAny.__baseScale = { x: mouthMesh.scale.x, y: mouthMesh.scale.y, z: mouthMesh.scale.z };
+    }
 
     let t = 0;
     const id = window.setInterval(() => {
-      const open = speaking ? 0.12 + 0.10 * Math.sin(t) : 0;
-      jaw.rotation.x = open;
+      const open = speaking ? 0.10 + 0.08 * Math.sin(t) : 0;
+
+      if (jaw) {
+        jaw.rotation.x = open;
+      } else if (mouthMesh) {
+        const base = mouthAny.__baseScale as { x: number; y: number; z: number };
+        // scale Y to simulate opening; also tiny Z scale for depth
+        mouthMesh.scale.set(base.x, base.y * (1 + open * 2.8), base.z * (1 + open * 0.6));
+      }
+
       t += 0.35;
     }, 60);
 
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      // restore mouth scale when stopping
+      if (mouthMesh && mouthAny.__baseScale) {
+        const base = mouthAny.__baseScale as { x: number; y: number; z: number };
+        mouthMesh.scale.set(base.x, base.y, base.z);
+      }
+    };
   }, [bones, speaking]);
 
   return (
