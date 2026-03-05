@@ -313,11 +313,6 @@ function chooseHighlightPhrase(params: {
   return trimEndJunk(firstCleanSentence(chunk)) || "";
 }
 
-function snippetFromChunkText(chunkText: string) {
-  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  return clean.slice(0, 220);
-}
 
 /** ✅ Free mini-avatar (no model) that animates while speaking */
 function AvatarSpeaker({ speaking }: { speaking: boolean }) {
@@ -1169,5 +1164,6 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
