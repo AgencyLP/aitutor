@@ -416,7 +416,14 @@ export default function WhiteboardLesson() {
     utter.onend = () => setIsSpeaking(false);
     utter.onerror = () => setIsSpeaking(false);
 
-    window.speechSynthesis.speak(utter);
+    // ✅ Force speaking=true in case onstart doesn't fire (happens on some browsers/deploys)
+    setIsSpeaking(true);
+
+// Optional safety: stop "speaking" if the browser never fires onend
+const approxMs = Math.min(60000, Math.max(2000, Math.floor(text.length * 60)));
+window.setTimeout(() => setIsSpeaking(false), approxMs);
+
+window.speechSynthesis.speak(utter);
   }
 
   const statusBadge = useMemo(() => {
@@ -1213,3 +1220,4 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
