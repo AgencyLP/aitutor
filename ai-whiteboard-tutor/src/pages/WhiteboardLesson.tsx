@@ -62,49 +62,51 @@ function extractBetween(text: string, startTag: string, endTag: string) {
   return text.slice(a + startTag.length, b).trim();
 }
 
+/** ✅ Helps when extractFirstJsonObject grabs a tiny {..} instead of the main one */
+function extractLargestJsonObject(text: string) {
+  const s = String(text || "");
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+  return s.slice(first, last + 1);
+}
+
+/** ✅ Robust parsing: accepts bullets as strings or objects; diagram optional */
 function safeParseLesson(text: string): Lesson | null {
   const marked = extractBetween(text, "JSON_START", "JSON_END");
 
-  // Try multiple candidates, from safest to loosest
   const candidates = [
     marked,
+    extractLargestJsonObject(text),
     extractFirstJsonObject(text),
-    // sometimes the model forgets opening braces
     extractFirstJsonObject("{" + text),
-    // sometimes it returns an array first or partial; fall back to entire text
     text,
   ].filter(Boolean) as string[];
 
   for (const candidateRaw of candidates) {
     const candidate = String(candidateRaw)
       .trim()
-      // remove invisible control chars that can break JSON.parse
-      .replace(/[\u0000-\u001F\u007F]/g, "");
+      .replace(/[\u0000-\u001F\u007F]/g, ""); // strip control chars
 
     try {
       const obj = JSON.parse(candidate);
 
-      // Accept wide shapes
       const rawTitle = typeof obj?.title === "string" ? obj.title : "";
       const title = String(rawTitle || "Lesson").trim();
 
-      // bullets can be array of strings or objects
       const rawBullets = Array.isArray(obj?.bullets) ? obj.bullets : [];
       const bullets: Bullet[] = rawBullets
         .map((b: any) => {
-          if (typeof b === "string") {
-            return { text: b.trim(), cites: [] as Citation[] };
-          }
+          if (typeof b === "string") return { text: b.trim(), cites: [] as Citation[] };
           const t = String(b?.text ?? "").trim();
-          return { text: t, cites: [] as Citation[] }; // ✅ ignore model cites (we add ours later)
+          return { text: t, cites: [] as Citation[] }; // ignore model cites; we attach ours
         })
         .filter((b) => b.text)
         .slice(0, 12);
 
       if (!bullets.length) continue;
 
-      // diagram: tolerate missing/invalid diagram by creating a default
-      const diagramType =
+      const diagramType: Diagram["type"] =
         obj?.diagram?.type === "flowchart" || obj?.diagram?.type === "timeline"
           ? obj.diagram.type
           : "concept_map";
@@ -134,14 +136,17 @@ function safeParseLesson(text: string): Lesson | null {
         }
       }
 
-      // If model didn’t give a usable diagram, synthesize a simple concept map from bullets
+      // if diagram missing/empty, synthesize a simple concept map from bullets
       if (!nodes.length) {
         const top = bullets[0]?.text ?? title;
         const others = bullets.slice(1, 7).map((b, i) => ({
           id: `n${i + 2}`,
           label: b.text.length > 40 ? b.text.slice(0, 40) + "…" : b.text,
         }));
-        nodes = [{ id: "n1", label: top.length > 40 ? top.slice(0, 40) + "…" : top }, ...others].slice(0, 8);
+        nodes = [
+          { id: "n1", label: top.length > 40 ? top.slice(0, 40) + "…" : top },
+          ...others,
+        ].slice(0, 8);
         edges = others.map((n) => ({ from: "n1", to: n.id, label: "" })).slice(0, 10);
       }
 
@@ -160,7 +165,6 @@ function safeParseLesson(text: string): Lesson | null {
 
   return null;
 }
-
 
 function tokenize(s: string) {
   return (s || "")
@@ -191,7 +195,6 @@ function isQuestiony(text: string) {
   const t = cleanOneLine(text).toLowerCase();
   if (!t) return false;
   if (t.includes("?")) return true;
-  // common “question titles” from search results
   if (t.startsWith("what is ")) return true;
   if (t.startsWith("what are ")) return true;
   if (t.startsWith("how to ")) return true;
@@ -204,39 +207,32 @@ function isQuestiony(text: string) {
 function firstCleanSentence(text: string) {
   const s = cleanOneLine(text);
   if (!s) return "";
-  // pick first true sentence if present
   const m = s.match(/^(.{25,}?[.!?])\s/);
   if (m?.[1]) return m[1].trim();
-  // otherwise cut at dash boundary (keeps it cleaner)
   const dashCut = s.split(/ — | - /)[0].trim();
   return dashCut || s;
 }
 
 function trimEndJunk(text: string) {
   let t = cleanOneLine(text);
-  // remove trailing punctuation junk/dashes
   t = t.replace(/[,:;–—-]+$/g, "").trim();
-  // remove trailing "..." if already there
   t = t.replace(/(\.\.\.|…)+$/g, "").trim();
   return t;
 }
 
+/** ✅ Web evidence line: Simple shorter, Normal longer, clean, non-questiony */
 function toWebEvidenceLine(r: WebResult, explainLevel: "simple" | "normal") {
   const title = cleanOneLine(String(r?.title ?? ""));
   const snippet = cleanOneLine(String(r?.snippet ?? ""));
 
   let base = firstCleanSentence(snippet);
-
-  // fallback to title if snippet weak
   if (base.length < 35) base = firstCleanSentence(title) || title;
-
   base = trimEndJunk(base);
 
   const maxLen = explainLevel === "simple" ? 120 : 220;
 
   if (base.length > maxLen) {
     let cut = base.slice(0, maxLen).trim();
-    // avoid mid-word cut
     const lastSpace = cut.lastIndexOf(" ");
     if (lastSpace > 60) cut = cut.slice(0, lastSpace).trim();
     cut = trimEndJunk(cut);
@@ -249,12 +245,11 @@ function toWebEvidenceLine(r: WebResult, explainLevel: "simple" | "normal") {
 function formatSourceLabel(source: string) {
   const s = (source || "").toLowerCase().trim();
   if (s === "wikipedia") return "Wikipedia";
-  // don’t show “duckduckgo” to users — too dev-y
   if (s === "duckduckgo") return "Search result";
   return "Web";
 }
 
-// -------- PDF highlight phrase selection that matches the real page text --------
+// ---------------- PDF quote/highlight matching ----------------
 
 function normalizeForFind(s: string) {
   return (s || "")
@@ -266,11 +261,18 @@ function normalizeForFind(s: string) {
     .trim();
 }
 
+/** ✅ Fallback quote from chunk */
+function snippetFromChunkText(chunkText: string) {
+  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return clean.slice(0, 220);
+}
+
 /**
- * Pick a phrase that:
- * 1) comes from the chunk text
- * 2) actually exists in the page text
- * 3) tends to be unique (longer in normal mode)
+ * Choose a quote that:
+ * - comes from the chunk
+ * - actually appears in the page text
+ * - tends to be unique (longer in normal)
  */
 function chooseHighlightPhrase(params: {
   chunkText: string;
@@ -279,40 +281,40 @@ function chooseHighlightPhrase(params: {
 }) {
   const chunk = cleanOneLine(params.chunkText);
   const page = cleanOneLine(params.pageText);
-
   if (!chunk || !page) return "";
 
   const chunkN = normalizeForFind(chunk);
   const pageN = normalizeForFind(page);
 
-  // Use a substring window (more robust than "first N words" when headers exist)
   const targetChars = params.explainLevel === "simple" ? 80 : 140;
   const step = 40;
-
-  // Try windows from the start, then from middle
   const starts = [0, Math.floor(chunkN.length * 0.25), Math.floor(chunkN.length * 0.5)];
 
-  for (const start0 of starts) {
-    for (let start = start0; start < Math.min(chunkN.length - 40, start0 + 260); start += step) {
-      const candidate = chunkN.slice(start, Math.min(chunkN.length, start + targetChars)).trim();
-      if (candidate.length < 50) continue;
-      const idx = pageN.indexOf(candidate);
-      if (idx !== -1) {
-        // map back to a readable version (from original chunk)
-        const originalCandidate = cleanOneLine(params.chunkText)
-          .slice(start, Math.min(cleanOneLine(params.chunkText).length, start + targetChars))
-          .trim();
+  const originalClean = cleanOneLine(params.chunkText);
 
+  for (const start0 of starts) {
+    for (
+      let start = start0;
+      start < Math.min(chunkN.length - 40, start0 + 260);
+      start += step
+    ) {
+      const candidate = chunkN
+        .slice(start, Math.min(chunkN.length, start + targetChars))
+        .trim();
+      if (candidate.length < 50) continue;
+
+      if (pageN.indexOf(candidate) !== -1) {
+        const originalCandidate = originalClean
+          .slice(start, Math.min(originalClean.length, start + targetChars))
+          .trim();
         const cleaned = trimEndJunk(originalCandidate);
         if (cleaned.length >= 40) return cleaned;
       }
     }
   }
 
-  // Fallback: first sentence
   return trimEndJunk(firstCleanSentence(chunk)) || "";
 }
-
 
 /** ✅ Free mini-avatar (no model) that animates while speaking */
 function AvatarSpeaker({ speaking }: { speaking: boolean }) {
@@ -406,8 +408,7 @@ export default function WhiteboardLesson() {
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
 
   const modelId =
-    (import.meta as any).env?.VITE_WEBLLM_MODEL ??
-    "Llama-3.2-3B-Instruct-q4f16_1-MLC";
+    (import.meta as any).env?.VITE_WEBLLM_MODEL ?? "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
   function speakTextLocal(text: string) {
     if (!("speechSynthesis" in window)) return;
@@ -421,10 +422,8 @@ export default function WhiteboardLesson() {
     utter.volume = 1.0;
 
     const voices = window.speechSynthesis.getVoices();
-    const preferThai =
-      voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
-    const preferEnglish =
-      voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
+    const preferThai = voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
+    const preferEnglish = voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
 
     if (preferThai) utter.voice = preferThai;
     else if (preferEnglish) utter.voice = preferEnglish;
@@ -498,13 +497,14 @@ export default function WhiteboardLesson() {
 
     const allChunks = chunkPdfPages(indexState.pdf.pages, { maxChars: 900, overlapChars: 120 });
 
+    // map chunkId -> real text for preview
     const map = new Map<string, { page: number; text: string }>();
     for (const c of allChunks) map.set(c.id, { page: c.page, text: c.text });
     chunkMapRef.current = map;
 
-    const seedQuery =
-      "summary key concepts definitions statistics findings implications conclusion";
+    const seedQuery = "summary key concepts definitions statistics findings implications conclusion";
 
+    // guarantee at least 1 chunk per page
     const chunksByPage = new Map<number, typeof allChunks>();
     for (const c of allChunks) {
       if (!chunksByPage.has(c.page)) chunksByPage.set(c.page, []);
@@ -578,21 +578,15 @@ JSON_END
           if (!parsed) {
             setLessonState({
               status: "error",
-              message:
-                "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
-              raw:
-                raw +
-                "\n\n----- REPAIR #1 -----\n\n" +
-                repaired1 +
-                "\n\n----- REPAIR #2 -----\n\n" +
-                repaired2,
+              message: "Model output wasn’t valid JSON. Open raw output below (includes repair attempts).",
+              raw: raw + "\n\n----- REPAIR #1 -----\n\n" + repaired1 + "\n\n----- REPAIR #2 -----\n\n" + repaired2,
             });
             return;
           }
         }
       }
 
-      // ✅ citations: quote == highlight phrase that exists in the page text
+      // ✅ Attach PDF citations ourselves (quote == highlight phrase)
       const usedChunkIds = new Set<string>();
       const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
@@ -605,24 +599,15 @@ JSON_END
           }
           if (picked.length >= 2) break;
         }
-
         if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
         if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
 
         const cites = picked.map((c) => {
           const pageText = indexState.pdf.pages?.[c.page - 1]?.text ?? "";
           const phrase =
-            chooseHighlightPhrase({
-              chunkText: c.text,
-              pageText,
-              explainLevel,
-            }) || snippetFromChunkText(c.text);
+            chooseHighlightPhrase({ chunkText: c.text, pageText, explainLevel }) || snippetFromChunkText(c.text);
 
-          return {
-            page: c.page,
-            chunkId: c.id,
-            quote: phrase,
-          };
+          return { page: c.page, chunkId: c.id, quote: phrase };
         });
 
         return { ...b, cites };
@@ -630,7 +615,7 @@ JSON_END
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      // ✅ WEB: filter questiony junk + prefer Wikipedia
+      // ✅ Web evidence (filtered + clean)
       if (useWeb) {
         try {
           setWebStatus("Searching web…");
@@ -647,17 +632,16 @@ JSON_END
           const pools = await Promise.all(queries.map((q) => webSearchPool(q)));
 
           const mergedWeb: WebResult[] = [];
-          const seenUrls2 = new Set<string>();
+          const seenUrls = new Set<string>();
           for (const arr of pools) {
             for (const r of arr) {
               if (!r?.url) continue;
-              if (seenUrls2.has(r.url)) continue;
-              seenUrls2.add(r.url);
+              if (seenUrls.has(r.url)) continue;
+              seenUrls.add(r.url);
               mergedWeb.push(r);
             }
           }
 
-          // remove low-quality results
           const cleanedWeb = mergedWeb.filter((r) => {
             const t = cleanOneLine(r.title || "");
             const s = cleanOneLine(r.snippet || "");
@@ -709,7 +693,7 @@ JSON_END
       setOpenBulletIndex(null);
       setPreview(null);
 
-      const speech = `${parsed.title}. ${parsed.bullets.map((b) => b.text).join(" ")}`;
+      const speech = `${parsed.title}. ${parsed.bullets.map((x) => x.text).join(" ")}`;
       setLastSpoken(speech);
       speakTextLocal(speech);
     } catch (e: any) {
@@ -824,22 +808,14 @@ JSON_END
             tabIndex={0}
             onClick={() => fileInputRef.current?.click()}
             onDrop={onDrop}
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={onDragOver}
             title="Click to upload or drag a PDF here"
           >
             <p style={{ margin: 0 }}>
               {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
             </p>
 
-            <div className="status-badge">
-              {indexState.status === "idle"
-                ? "No PDF yet"
-                : indexState.status === "indexing"
-                ? "Indexing…"
-                : indexState.status === "indexed"
-                ? `Indexed ✅ (${indexState.numPages} pages)`
-                : "Error"}
-            </div>
+            <div className="status-badge">{statusBadge}</div>
 
             {indexState.status === "error" && (
               <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
@@ -984,9 +960,7 @@ JSON_END
                           onClick={() => {
                             setOpenBulletIndex(openPdf ? null : i);
                             const first = b.cites?.[0];
-                            if (first) {
-                              setPreview({ page: first.page, chunkId: first.chunkId, phrase: first.quote });
-                            }
+                            if (first) setPreview({ page: first.page, chunkId: first.chunkId, phrase: first.quote });
                           }}
                         >
                           📄
@@ -1045,6 +1019,7 @@ JSON_END
           </div>
         </main>
 
+        {/* RIGHT */}
         <aside className="drawer-right">
           <div className="evidence-header">Source Evidence</div>
           <div className="evidence-content">
@@ -1164,6 +1139,3 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
-
-
-
