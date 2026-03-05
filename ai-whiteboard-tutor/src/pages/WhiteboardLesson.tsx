@@ -49,10 +49,10 @@ type LessonState =
 
 type WebTakeaway = {
   bulletIndex: number;
-  text: string;
+  text: string; // deterministic web evidence line (from snippet/title)
   url: string;
   title: string;
-  source: string; // keep string (wikipedia/duckduckgo/web)
+  source: string; // wikipedia/duckduckgo/web
 };
 
 function extractBetween(text: string, startTag: string, endTag: string) {
@@ -174,94 +174,33 @@ function snippetFromChunkText(chunkText: string) {
   return clean.slice(0, 220);
 }
 
-function buildWebTakeawaysPrompt(params: {
-  lessonTitle: string;
-  bullets: string[];
-  picks: Array<{ bulletIndex: number; source: string; title: string; snippet: string; url: string }>;
-}) {
-  const picksBlock = params.picks
-    .map(
-      (p) => `
-BULLET_INDEX: ${p.bulletIndex}
-SOURCE: ${p.source}
-TITLE: ${p.title}
-SNIPPET: ${p.snippet}
-URL: ${p.url}
-`.trim()
-    )
-    .join("\n\n---\n\n");
-
-  return `
-You are writing "Web Takeaways" for an EdTech AI tutor UI.
-
-RULES (very important):
-- Use ONLY the provided snippets. Do NOT invent facts.
-- Write 1 short sentence that SUPPORTS or ADDS CONTEXT for the bullet topic.
-- Output MUST be valid JSON ONLY.
-- Do NOT output placeholder words like "string".
-- Keep it concise.
-
-Return JSON array with EXACT schema:
-[
-  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "wikipedia|duckduckgo|web" }
-]
-
-LESSON_TITLE: ${params.lessonTitle}
-
-BULLETS:
-${params.bullets.map((b, i) => `${i}: ${b}`).join("\n")}
-
-WEB_PICKS:
-${picksBlock}
-`.trim();
+/** ✅ NEW: deterministic "web citation sentence" (no LLM) */
+function cleanOneLine(s: string) {
+  return (s || "")
+    .replace(/\s+/g, " ")
+    .replace(/\u00a0/g, " ")
+    .trim();
 }
 
-function buildWebTakeawaysRepairPrompt(badText: string) {
-  return `
-Rewrite the following into VALID JSON ONLY.
-It must be a JSON array of objects exactly like:
-[
-  { "bulletIndex": 0, "text": "one sentence", "url": "https://...", "title": "source title", "source": "web" }
-]
+function toWebEvidenceLine(r: WebResult) {
+  const title = cleanOneLine(String(r?.title ?? ""));
+  const snippet = cleanOneLine(String(r?.snippet ?? ""));
 
-TEXT:
-${badText}
-`.trim();
-}
+  // Prefer real snippet if it has substance
+  let text = snippet.length >= 40 ? snippet : "";
 
-function safeParseWebTakeaways(text: string): WebTakeaway[] | null {
-  const marked = extractBetween(text, "JSON_START", "JSON_END");
-  const candidate =
-    marked ??
-    extractFirstJsonObject(text) ??
-    extractFirstJsonObject("[" + text) ??
-    text;
+  // Fall back to title
+  if (!text && title) text = title;
 
-  try {
-    const arr = JSON.parse(candidate);
-    if (!Array.isArray(arr)) return null;
+  // Final fallback
+  if (!text) text = "Open source for supporting context.";
 
-    const out: WebTakeaway[] = arr
-      .map((x: any) => ({
-        bulletIndex: Number(x?.bulletIndex),
-        text: String(x?.text ?? "").trim(),
-        url: String(x?.url ?? "").trim(),
-        title: String(x?.title ?? "").trim(),
-        source: String(x?.source ?? "web").trim(),
-      }))
-      .filter(
-        (x) =>
-          Number.isFinite(x.bulletIndex) &&
-          x.bulletIndex >= 0 &&
-          x.text &&
-          x.url &&
-          x.title
-      );
+  // Keep it short and single-line like a citation
+  const maxLen = 200;
+  text = cleanOneLine(text);
+  if (text.length > maxLen) text = text.slice(0, maxLen).trim() + "…";
 
-    return out.length ? out : null;
-  } catch {
-    return null;
-  }
+  return text;
 }
 
 /** ✅ Free mini-avatar (no model) that animates while speaking */
@@ -393,8 +332,6 @@ export default function WhiteboardLesson() {
     if (indexState.status === "indexed") return `Indexed ✅ (${indexState.numPages} pages)`;
     return "Error";
   }, [indexState]);
-
-  const onPickFile = () => fileInputRef.current?.click();
 
   const handleFile = async (file: File) => {
     try {
@@ -574,7 +511,7 @@ JSON_END
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      // web takeaways (one sentence per bullet)
+      // ✅ WEB: deterministic evidence line (no LLM)
       if (useWeb) {
         try {
           setWebStatus("Searching web…");
@@ -601,7 +538,7 @@ JSON_END
             }
           }
 
-          const picks = parsed.bullets
+          const takeaways: WebTakeaway[] = parsed.bullets
             .map((b, i) => {
               const ranked = [...mergedWeb]
                 .map((r) => ({ r, s: scoreBulletToWeb(b.text, r) }))
@@ -609,63 +546,20 @@ JSON_END
                 .map((x) => x.r);
 
               const top = ranked[0];
-              if (!top) return null;
+              if (!top || !top.url) return null;
 
               return {
                 bulletIndex: i,
-                source: String(top.source || "web"),
-                title: String(top.title || "").trim(),
-                snippet: String(top.snippet || "").slice(0, 320),
-                url: String(top.url || "").trim(),
+                text: toWebEvidenceLine(top),
+                url: cleanOneLine(String(top.url || "")),
+                title: cleanOneLine(String(top.title || "Web source")),
+                source: cleanOneLine(String((top as any).source || "web")),
               };
             })
-            .filter(Boolean) as Array<{
-            bulletIndex: number;
-            source: string;
-            title: string;
-            snippet: string;
-            url: string;
-          }>;
+            .filter(Boolean) as WebTakeaway[];
 
-          setWebStatus(`Web results: ${mergedWeb.length} — writing takeaways…`);
-
-          const webPrompt = buildWebTakeawaysPrompt({
-            lessonTitle,
-            bullets: parsed.bullets.map((b) => b.text),
-            picks,
-          });
-
-          const webPromptWithMarkers = `
-${webPrompt}
-
-Output MUST be between markers:
-JSON_START
-[ ... ]
-JSON_END
-`.trim();
-
-          const webRaw = await generateText(modelId, webPromptWithMarkers);
-          let takeaways = safeParseWebTakeaways(webRaw);
-
-          if (!takeaways) {
-            const repaired = await generateText(modelId, buildWebTakeawaysRepairPrompt(webRaw));
-            takeaways = safeParseWebTakeaways(repaired);
-          }
-
-          if (!takeaways) {
-            setWebStatus("Web takeaways failed (JSON). Showing snippet fallback.");
-            const fallback: WebTakeaway[] = picks.slice(0, 12).map((p) => ({
-              bulletIndex: p.bulletIndex,
-              text: p.snippet ? p.snippet.slice(0, 180) : "No snippet available.",
-              url: p.url,
-              title: p.title || "Web result",
-              source: p.source || "web",
-            }));
-            setWebTakeaways(fallback);
-          } else {
-            setWebTakeaways(takeaways.slice(0, 12));
-            setWebStatus(`Web takeaways ready ✅ (${takeaways.length})`);
-          }
+          setWebTakeaways(takeaways.slice(0, 12));
+          setWebStatus(`Web evidence ready ✅ (${takeaways.length})`);
         } catch (e: any) {
           setWebTakeaways([]);
           setWebStatus(`Web failed: ${e?.message ?? "Unknown error"}`);
@@ -838,7 +732,6 @@ JSON_END
 
         {/* CENTER */}
         <main className="whiteboard-stage">
-          {/* ✅ AVATAR TOP-MIDDLE */}
           <AvatarSpeaker speaking={isSpeaking} />
 
           <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
@@ -893,9 +786,10 @@ JSON_END
                               <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
                                   🌐 Web
+                                  {w?.source ? <span style={{ marginLeft: 8, opacity: 0.7 }}>({w.source})</span> : null}
                                 </div>
                                 <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
-                                  {w ? w.text : "No relevant web result found for this bullet."}
+                                  {w ? w.text : "No relevant web source found for this bullet."}
                                 </div>
                               </div>
 
