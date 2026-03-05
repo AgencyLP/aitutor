@@ -49,7 +49,7 @@ type LessonState =
 
 type WebTakeaway = {
   bulletIndex: number;
-  text: string; // deterministic web evidence line (from snippet/title)
+  text: string;   // deterministic citation-style evidence line (snippet/title)
   url: string;
   title: string;
   source: string; // wikipedia/duckduckgo/web
@@ -162,19 +162,22 @@ function scoreBulletToWeb(bulletText: string, r: WebResult) {
   return hit;
 }
 
-function pickHighlightPhrase(chunkText: string) {
-  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  return clean.split(" ").slice(0, 14).join(" ");
-}
-
 function snippetFromChunkText(chunkText: string) {
   const clean = (chunkText || "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
   return clean.slice(0, 220);
 }
 
-/** ✅ NEW: deterministic "web citation sentence" (no LLM) */
+/** ✅ Make PDF highlight phrase (longer in Normal mode => better matching) */
+function pickHighlightPhrase(chunkText: string, explainLevel: "simple" | "normal") {
+  const clean = (chunkText || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const words = clean.split(" ");
+  const n = explainLevel === "simple" ? 14 : 24;
+  return words.slice(0, n).join(" ");
+}
+
+/** ✅ Web evidence: one clean sentence, Simple vs Normal length */
 function cleanOneLine(s: string) {
   return (s || "")
     .replace(/\s+/g, " ")
@@ -182,25 +185,60 @@ function cleanOneLine(s: string) {
     .trim();
 }
 
-function toWebEvidenceLine(r: WebResult) {
+function firstSentence(text: string) {
+  const s = cleanOneLine(text);
+  if (!s) return "";
+
+  // Grab an actual sentence end if present
+  const m = s.match(/^(.{20,}?[.!?])\s/);
+  if (m?.[1]) return m[1].trim();
+
+  // Otherwise cut at common dash boundaries if present
+  const dashCut = s.split(/ — | - /)[0].trim();
+  return dashCut || s;
+}
+
+function trimClean(text: string) {
+  let t = cleanOneLine(text);
+  t = t.replace(/[,:;–—-]+$/g, "").trim();
+  return t;
+}
+
+function toWebEvidenceLine(r: WebResult, explainLevel: "simple" | "normal") {
   const title = cleanOneLine(String(r?.title ?? ""));
   const snippet = cleanOneLine(String(r?.snippet ?? ""));
 
-  // Prefer real snippet if it has substance
-  let text = snippet.length >= 40 ? snippet : "";
+  let base = firstSentence(snippet);
 
-  // Fall back to title
-  if (!text && title) text = title;
+  // If snippet weak, fall back to title
+  if (base.length < 30) base = firstSentence(title) || title;
 
-  // Final fallback
-  if (!text) text = "Open source for supporting context.";
+  if (!base) base = "Open source for supporting context.";
 
-  // Keep it short and single-line like a citation
-  const maxLen = 200;
-  text = cleanOneLine(text);
-  if (text.length > maxLen) text = text.slice(0, maxLen).trim() + "…";
+  base = trimClean(base);
 
-  return text;
+  // ✅ Normal should be longer than Simple
+  const maxLen = explainLevel === "simple" ? 120 : 220;
+
+  if (base.length > maxLen) {
+    let cut = base.slice(0, maxLen).trim();
+
+    // avoid cutting mid-word
+    const lastSpace = cut.lastIndexOf(" ");
+    if (lastSpace > 60) cut = cut.slice(0, lastSpace).trim();
+
+    cut = trimClean(cut);
+    return cut + "…";
+  }
+
+  return base;
+}
+
+function formatSourceLabel(source: string) {
+  const s = (source || "").toLowerCase().trim();
+  if (s === "duckduckgo") return "Search result";
+  if (s === "wikipedia") return "Wikipedia";
+  return "Web";
 }
 
 /** ✅ Free mini-avatar (no model) that animates while speaking */
@@ -348,7 +386,7 @@ export default function WhiteboardLesson() {
       setWebTakeaways([]);
 
       const bytes = await file.arrayBuffer();
-      setPdfData(bytes.slice(0)); // avoid detached buffer issues
+      setPdfData(bytes.slice(0));
 
       const pdf = await extractPdfText(file);
 
@@ -483,7 +521,7 @@ JSON_END
         }
       }
 
-      // re-rank citations per bullet
+      // ✅ re-rank citations per bullet AND make quote == highlight text
       const usedChunkIds = new Set<string>();
       const fixedBullets = parsed.bullets.map((b) => {
         const candidates = retrieveTopChunks(b.text, allChunks, 8);
@@ -500,18 +538,21 @@ JSON_END
         if (picked.length < 1 && candidates[0]) picked.push(candidates[0]);
         if (picked.length < 2 && candidates[1]) picked.push(candidates[1]);
 
-        const cites = picked.map((c) => ({
-          page: c.page,
-          chunkId: c.id,
-          quote: snippetFromChunkText(c.text),
-        }));
+        const cites = picked.map((c) => {
+          const phrase = pickHighlightPhrase(c.text, explainLevel);
+          return {
+            page: c.page,
+            chunkId: c.id,
+            quote: phrase || snippetFromChunkText(c.text),
+          };
+        });
 
         return { ...b, cites };
       });
 
       parsed = { ...parsed, bullets: fixedBullets };
 
-      // ✅ WEB: deterministic evidence line (no LLM)
+      // ✅ WEB: deterministic evidence line (no LLM) with simple/normal lengths
       if (useWeb) {
         try {
           setWebStatus("Searching web…");
@@ -550,7 +591,7 @@ JSON_END
 
               return {
                 bulletIndex: i,
-                text: toWebEvidenceLine(top),
+                text: toWebEvidenceLine(top, explainLevel),
                 url: cleanOneLine(String(top.url || "")),
                 title: cleanOneLine(String(top.title || "Web source")),
                 source: cleanOneLine(String((top as any).source || "web")),
@@ -695,7 +736,15 @@ JSON_END
               {indexState.status === "indexed" ? `PDF: ${indexState.filename}` : "Click or drag PDF here"}
             </p>
 
-            <div className="status-badge">{statusBadge}</div>
+            <div className="status-badge">
+              {indexState.status === "idle"
+                ? "No PDF yet"
+                : indexState.status === "indexing"
+                ? "Indexing…"
+                : indexState.status === "indexed"
+                ? `Indexed ✅ (${indexState.numPages} pages)`
+                : "Error"}
+            </div>
 
             {indexState.status === "error" && (
               <div style={{ marginTop: 10, color: "#B91C1C", fontSize: 12 }}>{indexState.message}</div>
@@ -760,15 +809,14 @@ JSON_END
 
                   return (
                     <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-                      {/* main bullet row */}
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ marginTop: 2 }}>•</div>
 
                         <div style={{ flex: 1 }}>
-                          {/* PDF sentence */}
+                          {/* PDF bullet */}
                           <div>{b.text}</div>
 
-                          {/* ✅ WEB sentence (blue box) */}
+                          {/* Web evidence line */}
                           {useWeb && (
                             <div
                               style={{
@@ -786,14 +834,17 @@ JSON_END
                               <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
                                   🌐 Web
-                                  {w?.source ? <span style={{ marginLeft: 8, opacity: 0.7 }}>({w.source})</span> : null}
+                                  {w?.source ? (
+                                    <span style={{ marginLeft: 8, opacity: 0.7 }}>
+                                      {formatSourceLabel(w.source)}
+                                    </span>
+                                  ) : null}
                                 </div>
                                 <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
                                   {w ? w.text : "No relevant web source found for this bullet."}
                                 </div>
                               </div>
 
-                              {/* web link button */}
                               {w ? (
                                 <a
                                   href={w.url}
@@ -845,8 +896,9 @@ JSON_END
                             if (first) {
                               const real = chunkMapRef.current.get(first.chunkId);
                               const page = real?.page ?? first.page;
-                              const phrase = pickHighlightPhrase(real?.text ?? "");
-                              setPreview({ page, chunkId: first.chunkId, phrase });
+
+                              // ✅ highlight EXACTLY the same string the user sees in the citation
+                              setPreview({ page, chunkId: first.chunkId, phrase: first.quote });
                             }
                           }}
                         >
@@ -871,7 +923,7 @@ JSON_END
                           {b.cites.map((c, idx) => {
                             const real = chunkMapRef.current.get(c.chunkId);
                             const page = real?.page ?? c.page;
-                            const phrase = pickHighlightPhrase(real?.text ?? "");
+
                             return (
                               <div
                                 key={idx}
@@ -884,13 +936,14 @@ JSON_END
                                 title="Click to open PDF preview + highlight"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setPreview({ page, chunkId: c.chunkId, phrase });
+                                  // ✅ highlight EXACTLY the quote shown
+                                  setPreview({ page, chunkId: c.chunkId, phrase: c.quote });
                                 }}
                               >
                                 <div>
                                   <b>p.{page}</b> — <code>{c.chunkId}</code>
                                 </div>
-                                <div style={{ opacity: 0.9 }}>"{phrase ? phrase + "…" : c.quote}"</div>
+                                <div style={{ opacity: 0.9 }}>"{c.quote}"</div>
                               </div>
                             );
                           })}
@@ -932,7 +985,6 @@ JSON_END
         </aside>
       </div>
 
-      {/* PDF Preview Modal */}
       <PdfCitationPreview
         open={!!preview}
         onClose={() => setPreview(null)}
