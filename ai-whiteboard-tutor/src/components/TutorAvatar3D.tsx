@@ -6,7 +6,7 @@ import * as THREE from "three";
 function findByIncludes(root: THREE.Object3D, key: string) {
   const k = key.toLowerCase();
   let found: THREE.Object3D | null = null;
-  root.traverse((o) => {
+  root.traverse((o: THREE.Object3D) => {
     if ((o.name || "").toLowerCase().includes(k)) found = o;
   });
   return found;
@@ -33,16 +33,18 @@ function AutoFrame({
     cam.fov = 38;
     cam.updateProjectionMatrix();
 
-    const maxDim = Math.max(size.x, size.y, size.z);
     const fov = cam.fov * (Math.PI / 180);
-    let distance = maxDim / (2 * Math.tan(fov / 2));
-    distance *= 1.28;
 
-    // Aim slightly above center (chest/head)
+    // ✅ Fit to HEIGHT so full body can show
+    let distance = size.y / (2 * Math.tan(fov / 2));
+    distance *= 1.28; // padding (you said this looked perfect)
+
+    // Aim a bit low so shoes fit
     const aim = center.clone();
     aim.y = center.y + size.y * 0.10;
 
-    cam.position.set(center.x, center.y + size.y * 0.15, center.z + distance);
+    // Lower camera a bit so legs are not cropped
+    cam.position.set(center.x, center.y - size.y * 0.15, center.z + distance);
     cam.lookAt(aim);
     cam.updateProjectionMatrix();
   }, [camera, target, version]);
@@ -50,25 +52,35 @@ function AutoFrame({
   return null;
 }
 
+type Bones = {
+  head: THREE.Object3D | null;
+  leftShoulder: THREE.Object3D | null;
+  rightShoulder: THREE.Object3D | null;
+  leftArm: THREE.Object3D | null;
+  rightArm: THREE.Object3D | null;
+  jaw: THREE.Object3D | null;
+};
+
 function Model({ speaking }: { speaking: boolean }) {
   const gltf = useGLTF("/avatar/tutor.glb");
   const [frameVersion, setFrameVersion] = useState(0);
 
-  const bones = useMemo(() => {
+  const bones = useMemo<Bones>(() => {
     const root = gltf.scene;
 
-    const head = findByIncludes(root, "mixamorighead_06");
-    const leftShoulder = findByIncludes(root, "mixamorigleftshoulder_08");
-    const rightShoulder = findByIncludes(root, "mixamorigrightshoulder_032");
-    const leftArm = findByIncludes(root, "mixamorigleftarm_09");
-    const rightArm = findByIncludes(root, "mixamorigrightarm_033");
+    const head: THREE.Object3D | null = findByIncludes(root, "mixamorighead_06");
+    const leftShoulder: THREE.Object3D | null = findByIncludes(root, "mixamorigleftshoulder_08");
+    const rightShoulder: THREE.Object3D | null = findByIncludes(root, "mixamorigrightshoulder_032");
+    const leftArm: THREE.Object3D | null = findByIncludes(root, "mixamorigleftarm_09");
+    const rightArm: THREE.Object3D | null = findByIncludes(root, "mixamorigrightarm_033");
 
-    const jaw =
+    const jaw: THREE.Object3D | null =
       findByIncludes(root, "mixamorigjaw") || findByIncludes(root, "jaw");
 
     return { head, leftShoulder, rightShoulder, leftArm, rightArm, jaw };
   }, [gltf.scene]);
 
+  // Pose fix (stable): store rest pose and apply offsets
   useEffect(() => {
     const { head, leftShoulder, rightShoulder, leftArm, rightArm } = bones;
 
@@ -92,18 +104,22 @@ function Model({ speaking }: { speaking: boolean }) {
       dz: number
     ) => {
       if (!b) return;
-      const r = (b as any).__restRot;
+      const r = (b as any).__restRot as { x: number; y: number; z: number } | undefined;
       if (!r) return;
       b.rotation.set(r.x + dx, r.y + dy, r.z + dz);
     };
 
+    // Head: look forward slightly
     if (head) head.rotation.x = -0.12;
 
-    applyFromRest(leftShoulder, 0.08, 0.10, -0.30);
-    applyFromRest(rightShoulder, 0.08, -0.10, 0.30);
+    // ✅ Your working shoulder offsets (arms forward, not behind)
+    applyFromRest(leftShoulder, 0.05, 0.35, 0);
+    applyFromRest(rightShoulder, 0.05, -0.35, 0);
 
-    applyFromRest(leftArm, 0.55, 0.00, -0.05);
-    applyFromRest(rightArm, 0.55, 0.00, 0.05);
+    // ✅ Arms: keep them down naturally (leave these as your “done” values)
+    // If you already tuned these in your file, paste your tuned numbers here.
+    applyFromRest(leftArm, 0.55, 0.25, -0.12);
+    applyFromRest(rightArm, 0.55, -0.25, 0.12);
 
     gltf.scene.updateMatrixWorld(true);
 
@@ -111,6 +127,7 @@ function Model({ speaking }: { speaking: boolean }) {
     setFrameVersion((v) => v + 1);
   }, [bones, gltf.scene]);
 
+  // Basic talking (only if jaw exists)
   useEffect(() => {
     const { jaw } = bones;
     if (!jaw) return;
@@ -135,7 +152,7 @@ function Model({ speaking }: { speaking: boolean }) {
 
 export default function TutorAvatar3D({
   speaking,
-  height = 650,
+  height = 800,
 }: {
   speaking: boolean;
   height?: number;
