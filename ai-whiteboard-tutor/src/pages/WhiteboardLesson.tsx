@@ -44,7 +44,7 @@ type LessonState =
   | { status: "idle" }
   | { status: "loadingModel"; message: string }
   | { status: "generating"; message: string }
-  | { status: "idle"; lesson: Lesson; raw: string }
+  | { status: "ready"; lesson: Lesson; raw: string }
   | { status: "error"; message: string; raw?: string };
 
 type WebTakeaway = {
@@ -451,7 +451,7 @@ export default function WhiteboardLesson() {
       }
 
       setIndexState({ status: "indexing", filename: file.name });
-      setLessonState({ status: "ready" });
+      setLessonState({ status: "idle" });
       setOpenBulletIndex(null);
       setPreview(null);
       setWebStatus("");
@@ -883,7 +883,7 @@ JSON_END
                   <strong>{lessonState.lesson.title}</strong>
                 </div>
 
-                {lessonState.lesson.bullets.map((b, i) => {
+                lessonState.lesson.bullets.map((b: Bullet, i: number) => {
                   const openPdf = openBulletIndex === i;
                   const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : undefined;
 
@@ -989,7 +989,7 @@ JSON_END
                             color: "#334155",
                           }}
                         >
-                          {b.cites.map((c, idx) => (
+                          b.cites.map((c: Citation, idx: number) => (
                             <div
                               key={idx}
                               style={{
@@ -1148,6 +1148,7 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
 
 
