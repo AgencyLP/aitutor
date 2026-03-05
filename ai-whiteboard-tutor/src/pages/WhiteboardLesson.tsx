@@ -64,83 +64,103 @@ function extractBetween(text: string, startTag: string, endTag: string) {
 
 function safeParseLesson(text: string): Lesson | null {
   const marked = extractBetween(text, "JSON_START", "JSON_END");
-  const candidate =
-    marked ??
-    extractFirstJsonObject(text) ??
-    extractFirstJsonObject("{" + text) ??
-    text;
 
-  try {
-    const obj = JSON.parse(candidate);
+  // Try multiple candidates, from safest to loosest
+  const candidates = [
+    marked,
+    extractFirstJsonObject(text),
+    // sometimes the model forgets opening braces
+    extractFirstJsonObject("{" + text),
+    // sometimes it returns an array first or partial; fall back to entire text
+    text,
+  ].filter(Boolean) as string[];
 
-    if (!obj || typeof obj !== "object") return null;
-    if (!obj.title || !Array.isArray(obj.bullets) || !obj.diagram) return null;
+  for (const candidateRaw of candidates) {
+    const candidate = String(candidateRaw)
+      .trim()
+      // remove invisible control chars that can break JSON.parse
+      .replace(/[\u0000-\u001F\u007F]/g, "");
 
-    const diagramType =
-      obj.diagram?.type === "flowchart" || obj.diagram?.type === "timeline"
-        ? obj.diagram.type
-        : "concept_map";
+    try {
+      const obj = JSON.parse(candidate);
 
-    const bullets: Bullet[] = Array.isArray(obj.bullets)
-      ? obj.bullets
-          .map((b: any) => ({
-            text: String(b?.text ?? "").trim(),
-            cites: Array.isArray(b?.cites)
-              ? b.cites
-                  .map((c: any) => ({
-                    page: Number(c?.page),
-                    chunkId: String(c?.chunkId ?? ""),
-                    quote: String(c?.quote ?? ""),
-                  }))
-                  .filter(
-                    (c: any) =>
-                      Number.isFinite(c.page) &&
-                      c.page > 0 &&
-                      c.chunkId 
-                  )
-              : [],
-          }))
-          .filter((b: any) => b.text)
-          .slice(0, 12)
-      : [];
+      // Accept wide shapes
+      const rawTitle = typeof obj?.title === "string" ? obj.title : "";
+      const title = String(rawTitle || "Lesson").trim();
 
-    const lesson: Lesson = {
-      title: String(obj.title).trim(),
-      bullets,
-      diagram: {
-        type: diagramType,
-        nodes: Array.isArray(obj.diagram?.nodes)
-          ? obj.diagram.nodes
-              .map((n: any, i: number) => ({
-                id: String(n.id ?? `n${i + 1}`),
-                label: String(n.label ?? "").trim(),
-              }))
-              .filter((n: any) => n.label)
-              .slice(0, 8)
-          : [],
-        edges: Array.isArray(obj.diagram?.edges)
-          ? obj.diagram.edges
-              .map((e: any) => ({
-                from: String(e.from ?? ""),
-                to: String(e.to ?? ""),
-                label: e.label ? String(e.label) : "",
-              }))
-              .filter((e: any) => e.from && e.to)
-              .slice(0, 10)
-          : [],
-      },
-      notes: obj.notes ? String(obj.notes).trim() : "",
-    };
+      // bullets can be array of strings or objects
+      const rawBullets = Array.isArray(obj?.bullets) ? obj.bullets : [];
+      const bullets: Bullet[] = rawBullets
+        .map((b: any) => {
+          if (typeof b === "string") {
+            return { text: b.trim(), cites: [] as Citation[] };
+          }
+          const t = String(b?.text ?? "").trim();
+          return { text: t, cites: [] as Citation[] }; // ✅ ignore model cites (we add ours later)
+        })
+        .filter((b) => b.text)
+        .slice(0, 12);
 
-    if (!lesson.title || lesson.title.toLowerCase() === "string") return null;
-    if (lesson.bullets.length === 0) return null;
-    if (lesson.bullets.some((b) => b.text.toLowerCase() === "string")) return null;
-  
-    return lesson;
-  } catch {
-    return null;
+      if (!bullets.length) continue;
+
+      // diagram: tolerate missing/invalid diagram by creating a default
+      const diagramType =
+        obj?.diagram?.type === "flowchart" || obj?.diagram?.type === "timeline"
+          ? obj.diagram.type
+          : "concept_map";
+
+      let nodes: Array<{ id: string; label: string }> = [];
+      let edges: Array<{ from: string; to: string; label?: string }> = [];
+
+      if (obj?.diagram && typeof obj.diagram === "object") {
+        if (Array.isArray(obj.diagram.nodes)) {
+          nodes = obj.diagram.nodes
+            .map((n: any, i: number) => ({
+              id: String(n?.id ?? `n${i + 1}`),
+              label: String(n?.label ?? "").trim(),
+            }))
+            .filter((n: any) => n.label)
+            .slice(0, 8);
+        }
+        if (Array.isArray(obj.diagram.edges)) {
+          edges = obj.diagram.edges
+            .map((e: any) => ({
+              from: String(e?.from ?? ""),
+              to: String(e?.to ?? ""),
+              label: e?.label ? String(e.label) : "",
+            }))
+            .filter((e: any) => e.from && e.to)
+            .slice(0, 10);
+        }
+      }
+
+      // If model didn’t give a usable diagram, synthesize a simple concept map from bullets
+      if (!nodes.length) {
+        const top = bullets[0]?.text ?? title;
+        const others = bullets.slice(1, 7).map((b, i) => ({
+          id: `n${i + 2}`,
+          label: b.text.length > 40 ? b.text.slice(0, 40) + "…" : b.text,
+        }));
+        nodes = [{ id: "n1", label: top.length > 40 ? top.slice(0, 40) + "…" : top }, ...others].slice(0, 8);
+        edges = others.map((n) => ({ from: "n1", to: n.id, label: "" })).slice(0, 10);
+      }
+
+      const lesson: Lesson = {
+        title: title.toLowerCase() === "string" ? "Lesson" : title,
+        bullets,
+        diagram: { type: diagramType, nodes, edges },
+        notes: obj?.notes ? String(obj.notes).trim() : "",
+      };
+
+      return lesson;
+    } catch {
+      // try next candidate
+    }
   }
+
+  return null;
 }
+
 
 function tokenize(s: string) {
   return (s || "")
@@ -1149,4 +1169,5 @@ function DiagramPanel({ diagram }: { diagram: Diagram }) {
     </div>
   );
 }
+
 
