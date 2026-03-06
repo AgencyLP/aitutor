@@ -368,6 +368,7 @@ function AvatarSpeaker({ speaking }: { speaking: boolean }) {
 
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const speakingTimeoutRef = useRef<number | null>(null);
 
   const [indexState, setIndexState] = useState<IndexState>({ status: "idle" });
   const [lessonState, setLessonState] = useState<LessonState>({ status: "idle" });
@@ -391,40 +392,70 @@ export default function WhiteboardLesson() {
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
-  function speakTextLocal(text: string) {
-    if (!("speechSynthesis" in window)) return;
+function speakTextLocal(text: string) {
+  if (!("speechSynthesis" in window)) return;
 
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
+  window.speechSynthesis.cancel();
 
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = 1.0;
-    utter.pitch = 1.0;
-    utter.volume = 1.0;
-
-    const voices = window.speechSynthesis.getVoices();
-    const preferThai =
-      voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
-    const preferEnglish =
-      voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
-
-    if (preferThai) utter.voice = preferThai;
-    else if (preferEnglish) utter.voice = preferEnglish;
-    else if (voices[0]) utter.voice = voices[0];
-
-    utter.onstart = () => setIsSpeaking(true);
-    utter.onend = () => setIsSpeaking(false);
-    utter.onerror = () => setIsSpeaking(false);
-
-    // ✅ Force speaking=true in case onstart doesn't fire (happens on some browsers/deploys)
-    setIsSpeaking(true);
-
-// Optional safety: stop "speaking" if the browser never fires onend
-const approxMs = Math.min(60000, Math.max(2000, Math.floor(text.length * 60)));
-window.setTimeout(() => setIsSpeaking(false), approxMs);
-
-window.speechSynthesis.speak(utter);
+  if (speakingTimeoutRef.current) {
+    window.clearTimeout(speakingTimeoutRef.current);
+    speakingTimeoutRef.current = null;
   }
+
+  setIsSpeaking(false);
+
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.rate = 1.0;
+  utter.pitch = 1.0;
+  utter.volume = 1.0;
+
+  const voices = window.speechSynthesis.getVoices();
+  const preferThai =
+    voices.find((v) => (v.lang || "").toLowerCase().startsWith("th")) || null;
+  const preferEnglish =
+    voices.find((v) => (v.lang || "").toLowerCase().startsWith("en")) || null;
+
+  if (preferThai) utter.voice = preferThai;
+  else if (preferEnglish) utter.voice = preferEnglish;
+  else if (voices[0]) utter.voice = voices[0];
+
+  utter.onstart = () => {
+    setIsSpeaking(true);
+  };
+
+  utter.onend = () => {
+    setIsSpeaking(false);
+    if (speakingTimeoutRef.current) {
+      window.clearTimeout(speakingTimeoutRef.current);
+      speakingTimeoutRef.current = null;
+    }
+  };
+
+  utter.onerror = () => {
+    setIsSpeaking(false);
+    if (speakingTimeoutRef.current) {
+      window.clearTimeout(speakingTimeoutRef.current);
+      speakingTimeoutRef.current = null;
+    }
+  };
+
+  // fallback in case browser speech events are unreliable
+  setIsSpeaking(true);
+
+  const approxMs = Math.min(60000, Math.max(2000, Math.floor(text.length * 60)));
+  speakingTimeoutRef.current = window.setTimeout(() => {
+    setIsSpeaking(false);
+    speakingTimeoutRef.current = null;
+  }, approxMs);
+
+  window.speechSynthesis.speak(utter);
+}
+
+function runMiniAvatarTest() {
+  const testText = "Hello. This is a quick avatar speaking test.";
+  setLastSpoken(testText);
+  speakTextLocal(testText);
+}
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -863,6 +894,18 @@ if (useWeb) {
           >
             Replay Voice
           </button>
+          <button
+            className="video-btn"
+            onClick={runMiniAvatarTest}
+            style={{
+              padding: "6px 12px",
+              fontSize: "0.8rem",
+              background: "#E8F0FE",
+              color: "#2C3E50",
+            }}
+           >
+            Test Avatar
+          </button>
         </div>
       </header>
 
@@ -920,6 +963,15 @@ if (useWeb) {
         {/* CENTER */}
         <main className="whiteboard-stage">
           {/* ✅ AVATAR TOP-MIDDLE */}
+          <div
+             style={{
+             marginBottom: 8,
+             fontSize: 12,
+             color: isSpeaking ? "#16A34A" : "#64748B",
+           }}
+          >
+            Avatar speaking state: {isSpeaking ? "TRUE" : "FALSE"}
+          </div>
           <TutorAvatar3D speaking={isSpeaking} height={800} />
 
           <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
