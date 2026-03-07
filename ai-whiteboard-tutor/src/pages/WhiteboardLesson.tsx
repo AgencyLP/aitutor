@@ -366,6 +366,96 @@ function AvatarSpeaker({ speaking }: { speaking: boolean }) {
   );
 }
 
+function splitIntoSentences(text: string) {
+  return (text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .match(/[^.!?]+[.!?]?/g)
+    ?.map((s) => s.trim())
+    .filter(Boolean) ?? [];
+}
+
+function getSentenceIndexFromChar(sentences: string[], charIndex: number) {
+  let running = 0;
+
+  for (let i = 0; i < sentences.length; i++) {
+    const start = running;
+    const end = running + sentences[i].length;
+
+    if (charIndex >= start && charIndex <= end) return i;
+
+    running = end + 1;
+  }
+
+  return 0;
+}
+
+function ReadAlongText({
+  text,
+  activeIndex,
+  focusMode,
+}: {
+  text: string;
+  activeIndex: number;
+  focusMode: boolean;
+}) {
+  const sentences = splitIntoSentences(text);
+
+  if (!sentences.length) return null;
+
+  return (
+    <div
+      style={{
+        lineHeight: 1.8,
+        fontSize: "1rem",
+        padding: "12px",
+        borderRadius: "12px",
+        border: "1px solid #dbe4ff",
+        background: "#f8fbff",
+      }}
+    >
+      {sentences.map((sentence, i) => {
+        const isActive = i === activeIndex;
+        const isPast = i < activeIndex;
+
+        return (
+          <span
+            key={i}
+            style={{
+              display: "inline",
+              padding: "2px 6px",
+              marginRight: 4,
+              borderRadius: 8,
+              background: isActive ? "#dbeafe" : "transparent",
+              boxShadow: isActive ? "0 0 0 1px #93c5fd inset" : "none",
+              opacity: focusMode ? (isActive ? 1 : 0.35) : isPast ? 0.75 : 1,
+              transition: "all 180ms ease",
+            }}
+          >
+            {sentence}{" "}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function sentenceMatchesBullet(activeSentence: string, bulletText: string) {
+  const a = (activeSentence || "").toLowerCase().replace(/\s+/g, " ").trim();
+  const b = (bulletText || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  if (!a || !b) return false;
+
+  if (a.includes(b)) return true;
+  if (b.includes(a)) return true;
+
+  const aShort = a.slice(0, 80);
+  const bShort = b.slice(0, 80);
+
+  return (aShort.length > 20 && b.includes(aShort)) || (bShort.length > 20 && a.includes(bShort));
+}
+
+
 export default function WhiteboardLesson() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const speakingTimeoutRef = useRef<number | null>(null);
@@ -387,10 +477,13 @@ export default function WhiteboardLesson() {
 
   const [lastSpoken, setLastSpoken] = useState<string>("");
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [activeSentenceIndex, setActiveSentenceIndex] = useState<number>(0);
+  const [focusMode, setFocusMode] = useState<boolean>(true);
 
   const modelId =
     (import.meta as any).env?.VITE_WEBLLM_MODEL ??
     "Llama-3.2-3B-Instruct-q4f16_1-MLC";
+
 
 function speakTextLocal(text: string) {
   if (!("speechSynthesis" in window)) return;
@@ -402,7 +495,9 @@ function speakTextLocal(text: string) {
     speakingTimeoutRef.current = null;
   }
 
+  setLastSpoken(text);
   setIsSpeaking(false);
+  setActiveSentenceIndex(0);
 
   const utter = new SpeechSynthesisUtterance(text);
   utter.rate = 1.0;
@@ -419,12 +514,24 @@ function speakTextLocal(text: string) {
   else if (preferEnglish) utter.voice = preferEnglish;
   else if (voices[0]) utter.voice = voices[0];
 
+  const sentences = splitIntoSentences(text);
+
   utter.onstart = () => {
     setIsSpeaking(true);
+    setActiveSentenceIndex(0);
+  };
+
+  utter.onboundary = (event: SpeechSynthesisEvent) => {
+    if (!sentences.length) return;
+    const charIndex = event.charIndex ?? 0;
+    const sentenceIndex = getSentenceIndexFromChar(sentences, charIndex);
+    setActiveSentenceIndex(sentenceIndex);
   };
 
   utter.onend = () => {
     setIsSpeaking(false);
+    setActiveSentenceIndex(0);
+
     if (speakingTimeoutRef.current) {
       window.clearTimeout(speakingTimeoutRef.current);
       speakingTimeoutRef.current = null;
@@ -433,29 +540,40 @@ function speakTextLocal(text: string) {
 
   utter.onerror = () => {
     setIsSpeaking(false);
+    setActiveSentenceIndex(0);
+
     if (speakingTimeoutRef.current) {
       window.clearTimeout(speakingTimeoutRef.current);
       speakingTimeoutRef.current = null;
     }
   };
 
-  // fallback in case browser speech events are unreliable
   setIsSpeaking(true);
 
   const approxMs = Math.min(60000, Math.max(2000, Math.floor(text.length * 60)));
   speakingTimeoutRef.current = window.setTimeout(() => {
     setIsSpeaking(false);
+    setActiveSentenceIndex(0);
     speakingTimeoutRef.current = null;
   }, approxMs);
 
   window.speechSynthesis.speak(utter);
 }
 
+
 function runMiniAvatarTest() {
-  const testText = "Hello. This is a quick avatar speaking test.";
-  setLastSpoken(testText);
+  const testText =
+    "Hello. This is a quick avatar speaking test. The current sentence should highlight as I speak.";
   speakTextLocal(testText);
 }
+
+const spokenSentences = useMemo(() => splitIntoSentences(lastSpoken), [lastSpoken]);
+
+const activeSentence = useMemo(() => {
+  if (!spokenSentences.length) return "";
+  return spokenSentences[activeSentenceIndex] ?? "";
+}, [spokenSentences, activeSentenceIndex]);
+
 
   const statusBadge = useMemo(() => {
     if (indexState.status === "idle") return "No PDF yet";
@@ -790,9 +908,7 @@ if (useWeb) {
       setLessonState({ status: "ready", lesson: parsed, raw });
       setOpenBulletIndex(null);
       setPreview(null);
-
-      const speech = `${parsed.title}. ${parsed.bullets.map((b) => b.text).join(" ")}`;
-      setLastSpoken(speech);
+      const speech = parsed.bullets.map((b) => b.text).join(" ");
       speakTextLocal(speech);
     } catch (e: any) {
       setLessonState({ status: "error", message: e?.message ?? "Failed to generate lesson." });
@@ -973,7 +1089,6 @@ if (useWeb) {
             Avatar speaking state: {isSpeaking ? "TRUE" : "FALSE"}
           </div>
           <TutorAvatar3D speaking={isSpeaking} height={800} />
-
           <div className="whiteboard-surface" style={{ maxHeight: "calc(100vh - 170px)", overflowY: "auto" }}>
             {lessonState.status !== "ready" ? (
               <>
@@ -993,152 +1108,159 @@ if (useWeb) {
                 <div className="lesson-chunk">
                   <strong>{lessonState.lesson.title}</strong>
                 </div>
+                  
+{lessonState.lesson.bullets.map((b, i) => {
+  const openPdf = openBulletIndex === i;
+  const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : undefined;
+  const isActiveBullet = isSpeaking && sentenceMatchesBullet(activeSentence, b.text);
 
-                {lessonState.lesson.bullets.map((b, i) => {
-                  const openPdf = openBulletIndex === i;
-                  const w = useWeb ? webTakeaways.find((x) => x.bulletIndex === i) : undefined;
+  return (
+    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <div style={{ marginTop: 2 }}>•</div>
 
-                  return (
-                    <div key={i} className="lesson-chunk" style={{ marginBottom: 12 }}>
-                      {/* main bullet row */}
-                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                        <div style={{ marginTop: 2 }}>•</div>
+        <div style={{ flex: 1 }}>
+          <div
+            style={{
+              display: "inline",
+              padding: "4px 8px",
+              borderRadius: 10,
+              background: isActiveBullet ? "#DBEAFE" : "transparent",
+              boxShadow: isActiveBullet ? "0 0 0 1px #93C5FD inset" : "none",
+              opacity: isSpeaking && focusMode ? (isActiveBullet ? 1 : 0.45) : 1,
+              transition: "all 180ms ease",
+              lineHeight: 1.6,
+            }}
+          >
+            {b.text}
+          </div>
 
-                        <div style={{ flex: 1 }}>
-                          {/* PDF sentence */}
-                          <div>{b.text}</div>
+          {useWeb && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid #BAE6FD",
+                background: "#F0F9FF",
+                display: "flex",
+                gap: 10,
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+              }}
+            >
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
+                  🌐 Web
+                </div>
+                <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
+                  {w ? w.text : "No relevant web result found for this bullet."}
+                </div>
+              </div>
 
-                          {/* ✅ WEB sentence (blue box) */}
-                          {useWeb && (
-                            <div
-                              style={{
-                                marginTop: 8,
-                                padding: 10,
-                                borderRadius: 12,
-                                border: "1px solid #BAE6FD",
-                                background: "#F0F9FF",
-                                display: "flex",
-                                gap: 10,
-                                alignItems: "flex-start",
-                                justifyContent: "space-between",
-                              }}
-                            >
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>
-                                  🌐 Web
-                                </div>
-                                <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.35 }}>
-                                  {w ? w.text : "No relevant web result found for this bullet."}
-                                </div>
-                              </div>
+              {w ? (
+                <a
+                  href={w.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={w.title}
+                  style={{
+                    flexShrink: 0,
+                    textDecoration: "none",
+                    border: "1px solid #BAE6FD",
+                    borderRadius: 10,
+                    padding: "6px 10px",
+                    background: "#FFFFFF",
+                    color: "#2563EB",
+                    fontWeight: 900,
+                  }}
+                >
+                  🌐
+                </a>
+              ) : (
+                <div
+                  style={{
+                    flexShrink: 0,
+                    border: "1px solid #BAE6FD",
+                    borderRadius: 10,
+                    padding: "6px 10px",
+                    background: "#FFFFFF",
+                    color: "#94A3B8",
+                    fontWeight: 900,
+                  }}
+                  title="No link"
+                >
+                  🌐
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
-                              {/* web link button */}
-                              {w ? (
-                                <a
-                                  href={w.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  title={w.title}
-                                  style={{
-                                    flexShrink: 0,
-                                    textDecoration: "none",
-                                    border: "1px solid #BAE6FD",
-                                    borderRadius: 10,
-                                    padding: "6px 10px",
-                                    background: "#FFFFFF",
-                                    color: "#2563EB",
-                                    fontWeight: 900,
-                                  }}
-                                >
-                                  🌐
-                                </a>
-                              ) : (
-                                <div
-                                  style={{
-                                    flexShrink: 0,
-                                    border: "1px solid #BAE6FD",
-                                    borderRadius: 10,
-                                    padding: "6px 10px",
-                                    background: "#FFFFFF",
-                                    color: "#94A3B8",
-                                    fontWeight: 900,
-                                  }}
-                                  title="No link"
-                                >
-                                  🌐
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
+        <button
+          className="source-pill"
+          title="Show PDF source + open preview"
+          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
+          onClick={() => {
+            setOpenBulletIndex(openPdf ? null : i);
 
-                        {/* PDF source button */}
-                        <button
-                          className="source-pill"
-                          title="Show PDF source + open preview"
-                          style={{ border: "none", cursor: "pointer", padding: "4px 8px" }}
-                          onClick={() => {
-                            setOpenBulletIndex(openPdf ? null : i);
+            const first = b.cites?.[0];
+            if (first) {
+              const real = chunkMapRef.current.get(first.chunkId);
+              const page = real?.page ?? first.page;
+              const phrase = pickHighlightPhrase(real?.text ?? "");
+              setPreview({ page, chunkId: first.chunkId, phrase });
+            }
+          }}
+        >
+          📄
+        </button>
+      </div>
 
-                            const first = b.cites?.[0];
-                            if (first) {
-                              const real = chunkMapRef.current.get(first.chunkId);
-                              const page = real?.page ?? first.page;
-                              const phrase = pickHighlightPhrase(real?.text ?? "");
-                              setPreview({ page, chunkId: first.chunkId, phrase });
-                            }
-                          }}
-                        >
-                          📄
-                        </button>
-                      </div>
-
-                      {/* PDF citations */}
-                      {openPdf && b.cites?.length > 0 && (
-                        <div
-                          style={{
-                            marginTop: 8,
-                            marginLeft: 18,
-                            padding: 10,
-                            border: "1px solid #e5e7eb",
-                            borderRadius: 10,
-                            background: "#fff",
-                            fontSize: 12,
-                            color: "#334155",
-                          }}
-                        >
-                          {b.cites.map((c, idx) => {
-                            const real = chunkMapRef.current.get(c.chunkId);
-                            const page = real?.page ?? c.page;
-                            const phrase = pickHighlightPhrase(real?.text ?? "");
-                            return (
-                              <div
-                                key={idx}
-                                style={{
-                                  marginBottom: 10,
-                                  paddingBottom: 10,
-                                  borderBottom: "1px solid #f1f5f9",
-                                  cursor: "pointer",
-                                }}
-                                title="Click to open PDF preview + highlight"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPreview({ page, chunkId: c.chunkId, phrase });
-                                }}
-                              >
-                                <div>
-                                  <b>p.{page}</b> — <code>{c.chunkId}</code>
-                                </div>
-                                <div style={{ opacity: 0.9 }}>"{phrase ? phrase + "…" : c.quote}"</div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
+      {openPdf && b.cites?.length > 0 && (
+        <div
+          style={{
+            marginTop: 8,
+            marginLeft: 18,
+            padding: 10,
+            border: "1px solid #e5e7eb",
+            borderRadius: 10,
+            background: "#fff",
+            fontSize: 12,
+            color: "#334155",
+          }}
+        >
+          {b.cites.map((c, idx) => {
+            const real = chunkMapRef.current.get(c.chunkId);
+            const page = real?.page ?? c.page;
+            const phrase = pickHighlightPhrase(real?.text ?? "");
+            return (
+              <div
+                key={idx}
+                style={{
+                  marginBottom: 10,
+                  paddingBottom: 10,
+                  borderBottom: "1px solid #f1f5f9",
+                  cursor: "pointer",
+                }}
+                title="Click to open PDF preview + highlight"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPreview({ page, chunkId: c.chunkId, phrase });
+                }}
+              >
+                <div>
+                  <b>p.{page}</b> — <code>{c.chunkId}</code>
+                </div>
+                <div style={{ opacity: 0.9 }}>"{phrase ? phrase + "…" : c.quote}"</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+})}
                 <DiagramPanel diagram={lessonState.lesson.diagram} />
 
                 {lessonState.lesson.notes && lessonState.lesson.notes !== "string" && (
